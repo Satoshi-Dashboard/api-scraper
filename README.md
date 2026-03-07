@@ -6,7 +6,16 @@ Este es un microservicio autónomo en Node.js que sirve como recolector de datos
 Satoshi Dashboard necesita extraer datos de sitios web que bloquean las IPs de Vercel y otros datacenters (como `investing.com` o `bitinfocharts.com`). Al alojar este servicio en tu propia red o VPS (UmbrelOS, Portainer, etc.), utilizas IPs que no están bloqueadas, resolviendo así los errores 502 de la aplicación principal.
 
 ## APIs Soportadas
-Este servicio expone la información extraída a través de una API REST (puerto `9119` por defecto):
+
+| Endpoint | Descripción | Datos que muestra | Frecuencia de actualización |
+|----------|-------------|-------------------|----------------------------|
+| `/api/scrape/investing-currencies` | Investing.com | Tipos de cambio de divisas USD (EUR/USD, GBP/USD, etc.) | Cada 60 segundos |
+| `/api/scrape/bitinfocharts-richlist` | BitInfoCharts | Top 100 direcciones más ricas de Bitcoin y distribución | Diario (02:00 UTC) |
+| `/api/scrape/bitnodes-nodes` | BitNodes.io | Número de nodos Bitcoin y distribución por ASN | 2 veces al día (06:05 y 18:05 UTC) |
+| `/api/scrape/newhedge-global-assets` | NewHedge.io | Valores de activos globales relacionados con Bitcoin | Cada hora |
+
+### Endpoints disponibles
+
 - `GET /api/scrape/investing-currencies`
 - `GET /api/scrape/bitinfocharts-richlist`
 - `GET /api/scrape/bitnodes-nodes`
