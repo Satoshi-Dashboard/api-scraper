@@ -1,0 +1,14 @@
+{
+  "name": "satoshi-scraper",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted scraper proxy for Satoshi Dashboard — runs on UmbrelOS/Docker",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "node-cron": "^3.0.3"
+  }
+}

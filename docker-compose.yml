@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  satoshi-scraper:
+    build: .
+    container_name: satoshi-scraper
+    restart: unless-stopped
+    ports:
+      - "9119:9119"
+    environment:
+      - PORT=9119
+      - NODE_ENV=production
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9119/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    volumes:
+      - ./cache:/app/cache
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
