@@ -13,6 +13,7 @@ Satoshi Dashboard necesita extraer datos de sitios web que bloquean las IPs de V
 | `/api/scrape/bitinfocharts-richlist` | BitInfoCharts | Top 100 direcciones más ricas de Bitcoin y distribución | Diario (02:00 UTC) |
 | `/api/scrape/bitnodes-nodes` | BitNodes.io | Número de nodos Bitcoin y distribución por ASN | 2 veces al día (06:05 y 18:05 UTC) |
 | `/api/scrape/newhedge-global-assets` | NewHedge.io | Valores de activos globales relacionados con Bitcoin | Cada hora |
+| `/api/scrape/companiesmarketcap-gold` | CompaniesMarketCap | `GOLD`, market cap, precio y variación diaria del oro | Cada 15 minutos |
 
 ### Endpoints disponibles
 
@@ -20,6 +21,7 @@ Satoshi Dashboard necesita extraer datos de sitios web que bloquean las IPs de V
 - `GET /api/scrape/bitinfocharts-richlist`
 - `GET /api/scrape/bitnodes-nodes`
 - `GET /api/scrape/newhedge-global-assets`
+- `GET /api/scrape/companiesmarketcap-gold`
 - `GET /health`
 
 ## Despliegue en Portainer (Vía GitHub)

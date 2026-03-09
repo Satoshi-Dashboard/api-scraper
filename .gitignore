@@ -1,0 +1,5 @@
+node_modules/
+cache/
+*.log
+gold-response.json
+.aider.tags.cache.v4/

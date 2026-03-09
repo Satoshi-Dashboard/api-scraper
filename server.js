@@ -9,6 +9,7 @@
  *   2. bitinfocharts   → /api/scrape/bitinfocharts-richlist
  *   3. bitnodes.io     → /api/scrape/bitnodes-nodes  (API + HTML fallback)
  *   4. newhedge.io     → /api/scrape/newhedge-global-assets
+ *   5. companiesmarketcap.com → /api/scrape/companiesmarketcap-gold
  */
 
 import express from 'express';
@@ -112,6 +113,14 @@ async function fetchJson(url, { headers = {}, timeoutMs = FETCH_TIMEOUT_MS } = {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function extractFirstMatch(text, regex, fieldName) {
+  const match = text.match(regex);
+  if (!match?.[1]) {
+    throw new Error(`Could not extract ${fieldName}`);
+  }
+  return match[1].trim();
 }
 
 // ═══════════════════════════════════════════════
@@ -257,6 +266,65 @@ async function scrapeNewhedge() {
 }
 
 // ═══════════════════════════════════════════════
+//  5. COMPANIESMARKETCAP.COM — Gold market cap
+// ═══════════════════════════════════════════════
+const COMPANIESMARKETCAP_GOLD_URL = 'https://companiesmarketcap.com/gold/marketcap/';
+const COMPANIESMARKETCAP_ASSETS_URL = 'https://companiesmarketcap.com/assets-by-market-cap/';
+
+function parseCompaniesMarketCapGoldDetails(html) {
+  const marketCap = extractFirstMatch(html, /<h2>\s*Estimated Market Cap:\s*([^<]+)\s*<\/h2>/i, 'gold market cap');
+  const price = extractFirstMatch(
+    html,
+    /current gold price\s*\((\$[\d,]+)\s*per ounce\)/i,
+    'gold price'
+  );
+
+  return { marketCap, price };
+}
+
+function parseCompaniesMarketCapGoldToday(html) {
+  const rowMatch = html.match(/<tr class="precious-metals-outliner">[\s\S]*?<a href="\/gold\/marketcap\/">[\s\S]*?<\/tr>/i);
+  if (!rowMatch?.[0]) {
+    throw new Error('Could not find Gold row in assets table');
+  }
+
+  const row = rowMatch[0];
+  const id = extractFirstMatch(row, /<div class="company-code">(?:<span[^>]*><\/span>)?\s*([^<\s]+)\s*<\/div>/i, 'gold id');
+  const changeTodayPct = extractFirstMatch(
+    row,
+    /<td class="rh-sm"[^>]*>\s*<span[^>]*>\s*([+\-]?[\d.,]+%)\s*<\/span>\s*<\/td>/i,
+    'gold change today'
+  );
+
+  return { id, changeTodayPct };
+}
+
+async function scrapeCompaniesMarketCapGold() {
+  console.log('[scrape] companiesmarketcap.com gold ...');
+
+  const [goldHtml, assetsHtml] = await Promise.all([
+    fetchText(COMPANIESMARKETCAP_GOLD_URL),
+    fetchText(COMPANIESMARKETCAP_ASSETS_URL),
+  ]);
+
+  console.log(`[scrape] companiesmarketcap.com gold page → ${goldHtml.length} bytes`);
+  console.log(`[scrape] companiesmarketcap.com assets page → ${assetsHtml.length} bytes`);
+
+  const details = parseCompaniesMarketCapGoldDetails(goldHtml);
+  const summary = parseCompaniesMarketCapGoldToday(assetsHtml);
+
+  setCache('companiesmarketcap-gold', {
+    source: 'companiesmarketcap.com',
+    id: summary.id,
+    marketCap: details.marketCap,
+    price: details.price,
+    changeTodayPct: summary.changeTodayPct,
+    url: COMPANIESMARKETCAP_GOLD_URL,
+    assetsUrl: COMPANIESMARKETCAP_ASSETS_URL,
+  });
+}
+
+// ═══════════════════════════════════════════════
 //  Disk cache warm-up (runs at startup)
 // ═══════════════════════════════════════════════
 async function warmUpFromDisk() {
@@ -279,6 +347,7 @@ async function scrapeAll() {
     { name: 'bitinfocharts-richlist', fn: scrapeBitinfocharts },
     { name: 'bitnodes-nodes', fn: scrapeBitnodes },
     { name: 'newhedge-global-assets', fn: scrapeNewhedge },
+    { name: 'companiesmarketcap-gold', fn: scrapeCompaniesMarketCapGold },
   ];
 
   for (const job of jobs) {
@@ -344,6 +413,9 @@ app.get('/api/scrape/bitnodes-nodes', serveCached('bitnodes-nodes'));
 // 4. Newhedge global assets
 app.get('/api/scrape/newhedge-global-assets', serveCached('newhedge-global-assets'));
 
+// 5. CompaniesMarketCap gold
+app.get('/api/scrape/companiesmarketcap-gold', serveCached('companiesmarketcap-gold'));
+
 // Manual refresh trigger
 app.get('/api/scrape/refresh', async (_req, res) => {
   try {
@@ -378,6 +450,11 @@ cron.schedule('0 * * * *', () => {
   scrapeNewhedge().catch((e) => console.error('[cron] newhedge:', e.message));
 });
 
+// CompaniesMarketCap gold: every 15 minutes (source data is delayed, but intraday)
+cron.schedule('*/15 * * * *', () => {
+  scrapeCompaniesMarketCapGold().catch((e) => console.error('[cron] companiesmarketcap gold:', e.message));
+});
+
 // ═══════════════════════════════════════════════
 //  Start
 // ═══════════════════════════════════════════════
@@ -389,12 +466,14 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log('     GET /api/scrape/bitinfocharts-richlist');
   console.log('     GET /api/scrape/bitnodes-nodes');
   console.log('     GET /api/scrape/newhedge-global-assets');
+  console.log('     GET /api/scrape/companiesmarketcap-gold');
   console.log('     GET /api/scrape/refresh');
   console.log('\n   Cron schedules:');
   console.log('     investing-currencies  : every 60s');
   console.log('     bitinfocharts-richlist: daily at 02:00 UTC');
   console.log('     bitnodes-nodes        : 06:05 and 18:05 UTC');
   console.log('     newhedge-global-assets: every hour');
+  console.log('     companiesmarketcap-gold: every 15 min');
   console.log('\n   Loading cached data from disk...\n');
 
   await ensureCacheDir();
