@@ -28,8 +28,6 @@ services:
       - MEMPOOL_SPACE_WS_URL=${MEMPOOL_SPACE_WS_URL:-wss://mempool.space/api/v1/ws}
       - MEMPOOL_SPACE_RECONNECT_MS=${MEMPOOL_SPACE_RECONNECT_MS:-1000}
       - MEMPOOL_KNOTS_HTTP_BASE=${MEMPOOL_KNOTS_HTTP_BASE:-http://umbrel.local:3006}
-      - MEMPOOL_KNOTS_WS_URL=${MEMPOOL_KNOTS_WS_URL:-ws://umbrel.local:3006/api/v1/ws}
-      - MEMPOOL_KNOTS_RECONNECT_MS=${MEMPOOL_KNOTS_RECONNECT_MS:-1000}
       - MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS=${MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS:-1000}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9119/health"]

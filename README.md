@@ -16,7 +16,9 @@ Satoshi Dashboard necesita extraer datos de sitios web que bloquean las IPs de V
 | `/api/scrape/companiesmarketcap-gold` | CompaniesMarketCap | `GOLD`, market cap, precio y variación diaria del oro | Cada 15 minutos |
 | `/api/scrape/bitcoin-core-mempool` | Bitcoin Core RPC vía Tor | Resultado completo de `getmempoolinfo` cacheado | Cada 5 segundos |
 | `/api/scrape/mempool-space-memory-usage` | mempool.space | Uso de memoria del mempool en tiempo real desde `stats.mempoolInfo.usage` | Tiempo real (WebSocket) |
-| `/api/scrape/mempool-knots-memory-usage` | Mempool Knots local | Snapshot JSON local actualizado cada segundo desde `/api/v1/init-data.mempoolInfo.usage` | Cada 1 segundo |
+| `/api/scrape/mempool-knots-init-data-json` | Mempool Knots local | Snapshot JSON bruto de `/api/v1/init-data` | Cada 1 segundo |
+| `/api/scrape/json-knot` | JSON Knot relay | Relay del snapshot local de Knots listo para la otra app | Cada 1 segundo |
+| `/api/scrape/mempool-knots-memory-usage` | Alias JSON Knot | Alias del relay de Knots para compatibilidad | Cada 1 segundo |
 
 ### Endpoints disponibles
 
@@ -27,6 +29,8 @@ Satoshi Dashboard necesita extraer datos de sitios web que bloquean las IPs de V
 - `GET /api/scrape/companiesmarketcap-gold`
 - `GET /api/scrape/bitcoin-core-mempool`
 - `GET /api/scrape/mempool-space-memory-usage`
+- `GET /api/scrape/mempool-knots-init-data-json`
+- `GET /api/scrape/json-knot`
 - `GET /api/scrape/mempool-knots-memory-usage`
 - `GET /health`
 
