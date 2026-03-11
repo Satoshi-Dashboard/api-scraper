@@ -13,7 +13,7 @@
  *   6. bitcoin core rpc → /api/scrape/bitcoin-core-mempool
  *   7. mempool.space ws → /api/scrape/mempool-space-memory-usage
  *   8. mempool knots json → /api/scrape/mempool-knots-init-data-json
- *   9. json knot relay → /api/scrape/json-knot
+ *   9. mempool knots usage → /api/scrape/mempool-knots-memory-usage
  */
 
 import express from 'express';
@@ -39,7 +39,7 @@ const BTC_RPC_CACHE_KEY = 'bitcoin-core-mempool';
 const MEMPOOL_SPACE_WS_URL = process.env.MEMPOOL_SPACE_WS_URL || 'wss://mempool.space/api/v1/ws';
 const MEMPOOL_SPACE_RECONNECT_MS = Number(process.env.MEMPOOL_SPACE_RECONNECT_MS || 1000);
 const MEMPOOL_SPACE_CACHE_KEY = 'mempool-space-memory-usage';
-const MEMPOOL_KNOTS_HTTP_BASE = process.env.MEMPOOL_KNOTS_HTTP_BASE || 'http://umbrel.local:3006';
+const MEMPOOL_KNOTS_HTTP_BASE = process.env.MEMPOOL_KNOTS_HTTP_BASE || 'https://knotapi.zatobox.io';
 const MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS = Number(process.env.MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS || 1000);
 const MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY = 'mempool-knots-init-data-json';
 const MEMPOOL_KNOTS_CACHE_KEY = 'mempool-knots-memory-usage';
@@ -803,27 +803,7 @@ app.get('/api/scrape/mempool-knots-init-data-json', (_req, res) => {
   });
 });
 
-// 9. JSON knot relay for downstream apps
-app.get('/api/scrape/json-knot', (_req, res) => {
-  const entry = cached(MEMPOOL_KNOTS_CACHE_KEY);
-  if (!entry?.data) {
-    res.status(503).json({ ok: false, error: mempoolKnotsLastError || 'json knot data not yet available' });
-    return;
-  }
-
-  res.json({
-    ...entry.data,
-    _meta: {
-      cachedAt: entry.updatedAt,
-      scraper: 'satoshi-scraper',
-      transport: 'json-relay',
-      sourceCache: MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY,
-      fetchUrl: mempoolKnotsInitDataUrl(),
-    },
-  });
-});
-
-// 10. Mempool Knots memory usage legacy alias
+// 9. Mempool Knots memory usage relay
 app.get('/api/scrape/mempool-knots-memory-usage', (_req, res) => {
   const entry = cached(MEMPOOL_KNOTS_CACHE_KEY);
   if (!entry?.data) {
@@ -836,7 +816,7 @@ app.get('/api/scrape/mempool-knots-memory-usage', (_req, res) => {
     _meta: {
       cachedAt: entry.updatedAt,
       scraper: 'satoshi-scraper',
-      transport: 'json-relay',
+      transport: 'snapshot-relay',
       sourceCache: MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY,
       fetchUrl: mempoolKnotsInitDataUrl(),
     },
@@ -897,7 +877,6 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log('     GET /api/scrape/bitcoin-core-mempool');
   console.log('     GET /api/scrape/mempool-space-memory-usage');
   console.log('     GET /api/scrape/mempool-knots-init-data-json');
-  console.log('     GET /api/scrape/json-knot');
   console.log('     GET /api/scrape/mempool-knots-memory-usage');
   console.log('     GET /api/scrape/refresh');
   console.log('\n   Cron schedules:');
@@ -909,7 +888,7 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log(`     bitcoin-core-mempool  : every ${BTC_RPC_POLL_INTERVAL_MS}ms via Tor RPC`);
   console.log(`     mempool-space-memory-usage: realtime via WS (reconnect ${MEMPOOL_SPACE_RECONNECT_MS}ms)`);
   console.log(`     mempool-knots-init-data-json: snapshot json every ${MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS}ms via local HTTP`);
-  console.log(`     json-knot / mempool-knots-memory-usage: relay cached json snapshot`);
+  console.log(`     mempool-knots-memory-usage: relay cached json snapshot`);
   console.log('\n   Loading cached data from disk...\n');
 
   await ensureCacheDir();
