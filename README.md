@@ -15,6 +15,8 @@ Satoshi Dashboard necesita extraer datos de sitios web que bloquean las IPs de V
 | `/api/scrape/newhedge-global-assets` | NewHedge.io | Valores de activos globales relacionados con Bitcoin | Cada hora |
 | `/api/scrape/companiesmarketcap-gold` | CompaniesMarketCap | `GOLD`, market cap, precio y variación diaria del oro | Cada 15 minutos |
 | `/api/scrape/bitcoin-core-mempool` | Bitcoin Core RPC vía Tor | Resultado completo de `getmempoolinfo` cacheado | Cada 5 segundos |
+| `/api/scrape/mempool-space-memory-usage` | mempool.space | Uso de memoria del mempool en tiempo real desde `stats.mempoolInfo.usage` | Tiempo real (WebSocket) |
+| `/api/scrape/mempool-knots-memory-usage` | Mempool Knots local | Uso de memoria del mempool local desde `stats.mempoolInfo.usage` | Tiempo real (WebSocket) |
 
 ### Endpoints disponibles
 
@@ -24,6 +26,8 @@ Satoshi Dashboard necesita extraer datos de sitios web que bloquean las IPs de V
 - `GET /api/scrape/newhedge-global-assets`
 - `GET /api/scrape/companiesmarketcap-gold`
 - `GET /api/scrape/bitcoin-core-mempool`
+- `GET /api/scrape/mempool-space-memory-usage`
+- `GET /api/scrape/mempool-knots-memory-usage`
 - `GET /health`
 
 ## Despliegue en Portainer (Vía GitHub)

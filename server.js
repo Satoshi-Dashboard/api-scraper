@@ -11,6 +11,8 @@
  *   4. newhedge.io     → /api/scrape/newhedge-global-assets
  *   5. companiesmarketcap.com → /api/scrape/companiesmarketcap-gold
  *   6. bitcoin core rpc → /api/scrape/bitcoin-core-mempool
+ *   7. mempool.space ws → /api/scrape/mempool-space-memory-usage
+ *   8. mempool knots ws → /api/scrape/mempool-knots-memory-usage
  */
 
 import express from 'express';
@@ -32,6 +34,12 @@ const TOR_SOCKS_PORT = Number(process.env.TOR_SOCKS_PORT || 9050);
 const BTC_RPC_POLL_INTERVAL_MS = Number(process.env.BTC_RPC_POLL_INTERVAL_MS || 5000);
 const BTC_RPC_TIMEOUT_MS = Number(process.env.BTC_RPC_TIMEOUT_MS || 4000);
 const BTC_RPC_CACHE_KEY = 'bitcoin-core-mempool';
+const MEMPOOL_SPACE_WS_URL = process.env.MEMPOOL_SPACE_WS_URL || 'wss://mempool.space/api/v1/ws';
+const MEMPOOL_SPACE_RECONNECT_MS = Number(process.env.MEMPOOL_SPACE_RECONNECT_MS || 1000);
+const MEMPOOL_SPACE_CACHE_KEY = 'mempool-space-memory-usage';
+const MEMPOOL_KNOTS_WS_URL = process.env.MEMPOOL_KNOTS_WS_URL || 'ws://umbrel.local:3006/api/v1/ws';
+const MEMPOOL_KNOTS_RECONNECT_MS = Number(process.env.MEMPOOL_KNOTS_RECONNECT_MS || 1000);
+const MEMPOOL_KNOTS_CACHE_KEY = 'mempool-knots-memory-usage';
 
 // ─────────────────────────────────────────────
 //  Disk persistence helpers
@@ -152,6 +160,12 @@ const bitcoinRpcAgent = hasBitcoinRpcConfig()
 
 let bitcoinRpcPollInFlight = false;
 let bitcoinRpcLastError = hasBitcoinRpcConfig() ? null : 'BTC RPC env vars not configured';
+let mempoolSpaceLastError = null;
+let mempoolSpaceReconnectTimer = null;
+let mempoolSpaceSocket = null;
+let mempoolKnotsLastError = null;
+let mempoolKnotsReconnectTimer = null;
+let mempoolKnotsSocket = null;
 
 function fetchBitcoinRpc(method, params = []) {
   return new Promise((resolve, reject) => {
@@ -256,6 +270,146 @@ function startBitcoinRpcPolling() {
   setInterval(() => {
     pollBitcoinRpcMempool().catch((e) => console.warn(`[rpc] bitcoin-core mempool poll failed: ${e.message}`));
   }, BTC_RPC_POLL_INTERVAL_MS);
+}
+
+function scheduleMempoolSpaceReconnect() {
+  if (mempoolSpaceReconnectTimer) return;
+
+  mempoolSpaceReconnectTimer = setTimeout(() => {
+    mempoolSpaceReconnectTimer = null;
+    startMempoolSpaceStream();
+  }, MEMPOOL_SPACE_RECONNECT_MS);
+}
+
+function handleMempoolSpaceMessage(raw) {
+  let message;
+  try {
+    message = JSON.parse(typeof raw === 'string' ? raw : raw.toString());
+  } catch {
+    return;
+  }
+
+  const mempoolInfo = message?.mempoolInfo;
+  if (!mempoolInfo || typeof mempoolInfo.usage !== 'number') return;
+
+  const usagePct = typeof mempoolInfo.maxmempool === 'number' && mempoolInfo.maxmempool > 0
+    ? Number(((mempoolInfo.usage / mempoolInfo.maxmempool) * 100).toFixed(2))
+    : null;
+
+  setCache(MEMPOOL_SPACE_CACHE_KEY, {
+    source: 'mempool.space',
+    metric: 'memory-usage',
+    usage: mempoolInfo.usage,
+    maxmempool: mempoolInfo.maxmempool ?? null,
+    usagePct,
+    bytes: mempoolInfo.bytes ?? null,
+    size: mempoolInfo.size ?? null,
+    mempoolInfo,
+    url: 'https://mempool.space/',
+    wsUrl: MEMPOOL_SPACE_WS_URL,
+  });
+
+  mempoolSpaceLastError = null;
+}
+
+function startMempoolSpaceStream() {
+  if (mempoolSpaceSocket && (mempoolSpaceSocket.readyState === WebSocket.OPEN || mempoolSpaceSocket.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+
+  console.log(`[ws] mempool.space stats stream → ${MEMPOOL_SPACE_WS_URL}`);
+  const ws = new WebSocket(MEMPOOL_SPACE_WS_URL);
+  mempoolSpaceSocket = ws;
+
+  ws.addEventListener('open', () => {
+    ws.send(JSON.stringify({ action: 'want', data: ['stats'] }));
+  });
+
+  ws.addEventListener('message', (event) => {
+    handleMempoolSpaceMessage(event.data);
+  });
+
+  ws.addEventListener('error', () => {
+    mempoolSpaceLastError = 'mempool.space websocket error';
+  });
+
+  ws.addEventListener('close', () => {
+    mempoolSpaceLastError = mempoolSpaceLastError || 'mempool.space websocket closed';
+    if (mempoolSpaceSocket === ws) {
+      mempoolSpaceSocket = null;
+    }
+    scheduleMempoolSpaceReconnect();
+  });
+}
+
+function scheduleMempoolKnotsReconnect() {
+  if (mempoolKnotsReconnectTimer) return;
+
+  mempoolKnotsReconnectTimer = setTimeout(() => {
+    mempoolKnotsReconnectTimer = null;
+    startMempoolKnotsStream();
+  }, MEMPOOL_KNOTS_RECONNECT_MS);
+}
+
+function handleMempoolKnotsMessage(raw) {
+  let message;
+  try {
+    message = JSON.parse(typeof raw === 'string' ? raw : raw.toString());
+  } catch {
+    return;
+  }
+
+  const mempoolInfo = message?.mempoolInfo;
+  if (!mempoolInfo || typeof mempoolInfo.usage !== 'number') return;
+
+  const usagePct = typeof mempoolInfo.maxmempool === 'number' && mempoolInfo.maxmempool > 0
+    ? Number(((mempoolInfo.usage / mempoolInfo.maxmempool) * 100).toFixed(2))
+    : null;
+
+  setCache(MEMPOOL_KNOTS_CACHE_KEY, {
+    source: 'mempool knots',
+    metric: 'memory-usage',
+    usage: mempoolInfo.usage,
+    maxmempool: mempoolInfo.maxmempool ?? null,
+    usagePct,
+    bytes: mempoolInfo.bytes ?? null,
+    size: mempoolInfo.size ?? null,
+    mempoolInfo,
+    url: 'http://umbrel.local:3006/',
+    wsUrl: MEMPOOL_KNOTS_WS_URL,
+  });
+
+  mempoolKnotsLastError = null;
+}
+
+function startMempoolKnotsStream() {
+  if (mempoolKnotsSocket && (mempoolKnotsSocket.readyState === WebSocket.OPEN || mempoolKnotsSocket.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+
+  console.log(`[ws] mempool knots stats stream → ${MEMPOOL_KNOTS_WS_URL}`);
+  const ws = new WebSocket(MEMPOOL_KNOTS_WS_URL);
+  mempoolKnotsSocket = ws;
+
+  ws.addEventListener('open', () => {
+    ws.send(JSON.stringify({ action: 'want', data: ['stats'] }));
+  });
+
+  ws.addEventListener('message', (event) => {
+    handleMempoolKnotsMessage(event.data);
+  });
+
+  ws.addEventListener('error', () => {
+    mempoolKnotsLastError = 'mempool knots websocket error';
+  });
+
+  ws.addEventListener('close', () => {
+    mempoolKnotsLastError = mempoolKnotsLastError || 'mempool knots websocket closed';
+    if (mempoolKnotsSocket === ws) {
+      mempoolKnotsSocket = null;
+    }
+    scheduleMempoolKnotsReconnect();
+  });
 }
 
 // ═══════════════════════════════════════════════
@@ -569,6 +723,44 @@ app.get('/api/scrape/bitcoin-core-mempool', (_req, res) => {
   });
 });
 
+// 7. Mempool.space memory usage via websocket stats
+app.get('/api/scrape/mempool-space-memory-usage', (_req, res) => {
+  const entry = cached(MEMPOOL_SPACE_CACHE_KEY);
+  if (!entry?.data) {
+    res.status(503).json({ ok: false, error: mempoolSpaceLastError || 'mempool.space data not yet available' });
+    return;
+  }
+
+  res.json({
+    ...entry.data,
+    _meta: {
+      cachedAt: entry.updatedAt,
+      scraper: 'satoshi-scraper',
+      transport: 'websocket',
+      subscription: 'stats',
+    },
+  });
+});
+
+// 8. Mempool Knots memory usage via websocket stats
+app.get('/api/scrape/mempool-knots-memory-usage', (_req, res) => {
+  const entry = cached(MEMPOOL_KNOTS_CACHE_KEY);
+  if (!entry?.data) {
+    res.status(503).json({ ok: false, error: mempoolKnotsLastError || 'mempool knots data not yet available' });
+    return;
+  }
+
+  res.json({
+    ...entry.data,
+    _meta: {
+      cachedAt: entry.updatedAt,
+      scraper: 'satoshi-scraper',
+      transport: 'websocket',
+      subscription: 'stats',
+    },
+  });
+});
+
 // Manual refresh trigger
 app.get('/api/scrape/refresh', async (_req, res) => {
   try {
@@ -621,6 +813,8 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log('     GET /api/scrape/newhedge-global-assets');
   console.log('     GET /api/scrape/companiesmarketcap-gold');
   console.log('     GET /api/scrape/bitcoin-core-mempool');
+  console.log('     GET /api/scrape/mempool-space-memory-usage');
+  console.log('     GET /api/scrape/mempool-knots-memory-usage');
   console.log('     GET /api/scrape/refresh');
   console.log('\n   Cron schedules:');
   console.log('     investing-currencies  : every 60s');
@@ -629,11 +823,15 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log('     newhedge-global-assets: every hour');
   console.log('     companiesmarketcap-gold: every 15 min');
   console.log(`     bitcoin-core-mempool  : every ${BTC_RPC_POLL_INTERVAL_MS}ms via Tor RPC`);
+  console.log(`     mempool-space-memory-usage: realtime via WS (reconnect ${MEMPOOL_SPACE_RECONNECT_MS}ms)`);
+  console.log(`     mempool-knots-memory-usage: realtime via WS (reconnect ${MEMPOOL_KNOTS_RECONNECT_MS}ms)`);
   console.log('\n   Loading cached data from disk...\n');
 
   await ensureCacheDir();
   await warmUpFromDisk();
   startBitcoinRpcPolling();
+  startMempoolSpaceStream();
+  startMempoolKnotsStream();
   console.log('\n   Running initial scrape...\n');
 
   await scrapeAll();

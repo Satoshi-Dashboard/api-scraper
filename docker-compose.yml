@@ -25,6 +25,10 @@ services:
       - TOR_SOCKS_PORT=${TOR_SOCKS_PORT:-9050}
       - BTC_RPC_POLL_INTERVAL_MS=${BTC_RPC_POLL_INTERVAL_MS:-5000}
       - BTC_RPC_TIMEOUT_MS=${BTC_RPC_TIMEOUT_MS:-4000}
+      - MEMPOOL_SPACE_WS_URL=${MEMPOOL_SPACE_WS_URL:-wss://mempool.space/api/v1/ws}
+      - MEMPOOL_SPACE_RECONNECT_MS=${MEMPOOL_SPACE_RECONNECT_MS:-1000}
+      - MEMPOOL_KNOTS_WS_URL=${MEMPOOL_KNOTS_WS_URL:-ws://umbrel.local:3006/api/v1/ws}
+      - MEMPOOL_KNOTS_RECONNECT_MS=${MEMPOOL_KNOTS_RECONNECT_MS:-1000}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9119/health"]
       interval: 30s
