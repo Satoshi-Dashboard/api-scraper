@@ -10,6 +10,7 @@
   "dependencies": {
     "express": "^4.21.0",
     "node-cron": "^3.0.3",
-    "socks-proxy-agent": "^8.0.5"
+    "socks-proxy-agent": "^8.0.5",
+    "ws": "^8.19.0"
   }
 }
