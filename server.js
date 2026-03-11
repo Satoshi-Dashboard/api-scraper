@@ -41,6 +41,7 @@ const MEMPOOL_SPACE_CACHE_KEY = 'mempool-space-memory-usage';
 const MEMPOOL_KNOTS_HTTP_BASE = process.env.MEMPOOL_KNOTS_HTTP_BASE || 'http://umbrel.local:3006';
 const MEMPOOL_KNOTS_WS_URL = process.env.MEMPOOL_KNOTS_WS_URL || 'ws://umbrel.local:3006/api/v1/ws';
 const MEMPOOL_KNOTS_RECONNECT_MS = Number(process.env.MEMPOOL_KNOTS_RECONNECT_MS || 1000);
+const MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS = Number(process.env.MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS || 1000);
 const MEMPOOL_KNOTS_CACHE_KEY = 'mempool-knots-memory-usage';
 
 // ─────────────────────────────────────────────
@@ -171,6 +172,7 @@ let mempoolKnotsSocket = null;
 let mempoolKnotsCandidateIndex = 0;
 let mempoolKnotsSnapshotTimer = null;
 let mempoolKnotsLatestData = null;
+let mempoolKnotsHttpPollInFlight = false;
 
 function fetchBitcoinRpc(method, params = []) {
   return new Promise((resolve, reject) => {
@@ -351,6 +353,10 @@ function nextMempoolKnotsRunAt() {
   return new Date(Date.now() + 1000);
 }
 
+function mempoolKnotsInitDataUrl() {
+  return `${MEMPOOL_KNOTS_HTTP_BASE.replace(/\/$/, '')}/api/v1/init-data`;
+}
+
 function mempoolKnotsWsCandidates() {
   const candidates = [
     MEMPOOL_KNOTS_WS_URL,
@@ -386,6 +392,28 @@ async function persistMempoolKnotsSnapshot() {
   const nowIso = new Date().toISOString();
   setCacheAt(MEMPOOL_KNOTS_CACHE_KEY, mempoolKnotsLatestData, nowIso);
   await writeDiskCache(MEMPOOL_KNOTS_CACHE_KEY, mempoolKnotsLatestData, nextMempoolKnotsRunAt());
+}
+
+async function pollMempoolKnotsHttp() {
+  if (mempoolKnotsHttpPollInFlight) return;
+  mempoolKnotsHttpPollInFlight = true;
+
+  try {
+    const initData = await fetchJson(mempoolKnotsInitDataUrl(), { timeoutMs: 4000 });
+    const mempoolInfo = initData?.mempoolInfo;
+    if (!mempoolInfo || typeof mempoolInfo.usage !== 'number') {
+      throw new Error('mempoolInfo missing in init-data');
+    }
+
+    mempoolKnotsLatestData = buildMempoolKnotsPayload(mempoolInfo, MEMPOOL_KNOTS_WS_URL);
+    setCache(MEMPOOL_KNOTS_CACHE_KEY, mempoolKnotsLatestData);
+    mempoolKnotsLastError = null;
+  } catch (e) {
+    mempoolKnotsLastError = e instanceof Error ? e.message : String(e);
+    console.warn(`[http] mempool knots poll failed: ${mempoolKnotsLastError}`);
+  } finally {
+    mempoolKnotsHttpPollInFlight = false;
+  }
 }
 
 function scheduleMempoolKnotsReconnect() {
@@ -453,15 +481,22 @@ function startMempoolKnotsStream() {
 function startMempoolKnotsSnapshotLoop() {
   if (mempoolKnotsSnapshotTimer) return;
 
+  pollMempoolKnotsHttp().catch((e) => {
+    console.warn(`[http] Failed initial mempool knots poll: ${e.message}`);
+  });
+
   persistMempoolKnotsSnapshot().catch((e) => {
     console.warn(`[disk] Failed initial mempool knots snapshot write: ${e.message}`);
   });
 
   mempoolKnotsSnapshotTimer = setInterval(() => {
+    pollMempoolKnotsHttp().catch((e) => {
+      console.warn(`[http] Failed mempool knots poll: ${e.message}`);
+    });
     persistMempoolKnotsSnapshot().catch((e) => {
       console.warn(`[disk] Failed mempool knots snapshot write: ${e.message}`);
     });
-  }, 1000);
+  }, MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS);
 }
 
 // ═══════════════════════════════════════════════
@@ -810,8 +845,8 @@ app.get('/api/scrape/mempool-knots-memory-usage', (_req, res) => {
     _meta: {
       cachedAt: entry.updatedAt,
       scraper: 'satoshi-scraper',
-      transport: 'websocket',
-      subscription: 'stats',
+      transport: 'http-poll',
+      fetchUrl: mempoolKnotsInitDataUrl(),
     },
   });
 });
@@ -879,7 +914,7 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log('     companiesmarketcap-gold: every 15 min');
   console.log(`     bitcoin-core-mempool  : every ${BTC_RPC_POLL_INTERVAL_MS}ms via Tor RPC`);
   console.log(`     mempool-space-memory-usage: realtime via WS (reconnect ${MEMPOOL_SPACE_RECONNECT_MS}ms)`);
-  console.log(`     mempool-knots-memory-usage: snapshot json every 1000ms via local WS`);
+  console.log(`     mempool-knots-memory-usage: snapshot json every ${MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS}ms via local HTTP`);
   console.log('\n   Loading cached data from disk...\n');
 
   await ensureCacheDir();
@@ -887,7 +922,6 @@ app.listen(PORT, '0.0.0.0', async () => {
   startBitcoinRpcPolling();
   startMempoolSpaceStream();
   startMempoolKnotsSnapshotLoop();
-  startMempoolKnotsStream();
   console.log('\n   Running initial scrape...\n');
 
   await scrapeAll();

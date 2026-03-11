@@ -16,7 +16,7 @@ Satoshi Dashboard necesita extraer datos de sitios web que bloquean las IPs de V
 | `/api/scrape/companiesmarketcap-gold` | CompaniesMarketCap | `GOLD`, market cap, precio y variación diaria del oro | Cada 15 minutos |
 | `/api/scrape/bitcoin-core-mempool` | Bitcoin Core RPC vía Tor | Resultado completo de `getmempoolinfo` cacheado | Cada 5 segundos |
 | `/api/scrape/mempool-space-memory-usage` | mempool.space | Uso de memoria del mempool en tiempo real desde `stats.mempoolInfo.usage` | Tiempo real (WebSocket) |
-| `/api/scrape/mempool-knots-memory-usage` | Mempool Knots local | Snapshot JSON local actualizado cada segundo desde `stats.mempoolInfo.usage` | Cada 1 segundo |
+| `/api/scrape/mempool-knots-memory-usage` | Mempool Knots local | Snapshot JSON local actualizado cada segundo desde `/api/v1/init-data.mempoolInfo.usage` | Cada 1 segundo |
 
 ### Endpoints disponibles
 
