@@ -10,32 +10,20 @@
  *   3. bitnodes.io     → /api/scrape/bitnodes-nodes  (API + HTML fallback)
  *   4. newhedge.io     → /api/scrape/newhedge-global-assets
  *   5. companiesmarketcap.com → /api/scrape/companiesmarketcap-gold
- *   6. bitcoin core rpc → /api/scrape/bitcoin-core-mempool
- *   7. mempool.space ws → /api/scrape/mempool-space-memory-usage
- *   8. mempool knots json → /api/scrape/mempool-knots-init-data-json
- *   9. mempool knots usage → /api/scrape/mempool-knots-memory-usage
+ *   6. mempool.space ws → /api/scrape/mempool-space-memory-usage
+ *   7. mempool knots json → /api/scrape/mempool-knots-init-data-json
+ *   8. mempool knots usage → /api/scrape/mempool-knots-memory-usage
  */
 
 import express from 'express';
 import cron from 'node-cron';
-import http from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import { SocksProxyAgent } from 'socks-proxy-agent';
 import WebSocket from 'ws';
 
 const PORT = Number(process.env.PORT || 9119);
 const FETCH_TIMEOUT_MS = 20_000;
 const CACHE_DIR = path.resolve(process.cwd(), 'cache');
-const BTC_RPC_ONION = process.env.BTC_RPC_ONION || '';
-const BTC_RPC_PORT = Number(process.env.BTC_RPC_PORT || 9332);
-const BTC_RPC_USER = process.env.BTC_RPC_USER || '';
-const BTC_RPC_PASS = process.env.BTC_RPC_PASS || '';
-const TOR_SOCKS_HOST = process.env.TOR_SOCKS_HOST || 'tor';
-const TOR_SOCKS_PORT = Number(process.env.TOR_SOCKS_PORT || 9050);
-const BTC_RPC_POLL_INTERVAL_MS = Number(process.env.BTC_RPC_POLL_INTERVAL_MS || 5000);
-const BTC_RPC_TIMEOUT_MS = Number(process.env.BTC_RPC_TIMEOUT_MS || 4000);
-const BTC_RPC_CACHE_KEY = 'bitcoin-core-mempool';
 const MEMPOOL_SPACE_WS_URL = process.env.MEMPOOL_SPACE_WS_URL || 'wss://mempool.space/api/v1/ws';
 const MEMPOOL_SPACE_RECONNECT_MS = Number(process.env.MEMPOOL_SPACE_RECONNECT_MS || 1000);
 const MEMPOOL_SPACE_CACHE_KEY = 'mempool-space-memory-usage';
@@ -43,6 +31,23 @@ const MEMPOOL_KNOTS_HTTP_BASE = process.env.MEMPOOL_KNOTS_HTTP_BASE || 'https://
 const MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS = Number(process.env.MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS || 1000);
 const MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY = 'mempool-knots-init-data-json';
 const MEMPOOL_KNOTS_CACHE_KEY = 'mempool-knots-memory-usage';
+const HTTPS_REDIRECT_HOST = (process.env.HTTPS_REDIRECT_HOST || 'api.zatobox.io').toLowerCase();
+const CORS_ALLOWED_ORIGINS = new Set(
+  (process.env.CORS_ALLOWED_ORIGINS || 'https://zatobox.io,https://www.zatobox.io')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+);
+
+
+let mempoolSpaceLastError = null;
+let mempoolSpaceReconnectTimer = null;
+let mempoolSpaceSocket = null;
+let mempoolKnotsLastError = null;
+let mempoolKnotsSnapshotTimer = null;
+let mempoolKnotsLatestData = null;
+let mempoolKnotsLatestInitData = null;
+let mempoolKnotsHttpPollInFlight = false;
 
 // ─────────────────────────────────────────────
 //  Disk persistence helpers
@@ -151,130 +156,6 @@ function extractFirstMatch(text, regex, fieldName) {
     throw new Error(`Could not extract ${fieldName}`);
   }
   return match[1].trim();
-}
-
-function hasBitcoinRpcConfig() {
-  return Boolean(BTC_RPC_ONION && BTC_RPC_USER && BTC_RPC_PASS);
-}
-
-const bitcoinRpcAgent = hasBitcoinRpcConfig()
-  ? new SocksProxyAgent(`socks5h://${TOR_SOCKS_HOST}:${TOR_SOCKS_PORT}`)
-  : null;
-
-let bitcoinRpcPollInFlight = false;
-let bitcoinRpcLastError = hasBitcoinRpcConfig() ? null : 'BTC RPC env vars not configured';
-let mempoolSpaceLastError = null;
-let mempoolSpaceReconnectTimer = null;
-let mempoolSpaceSocket = null;
-let mempoolKnotsLastError = null;
-let mempoolKnotsSnapshotTimer = null;
-let mempoolKnotsLatestData = null;
-let mempoolKnotsLatestInitData = null;
-let mempoolKnotsHttpPollInFlight = false;
-
-function fetchBitcoinRpc(method, params = []) {
-  return new Promise((resolve, reject) => {
-    if (!hasBitcoinRpcConfig()) {
-      reject(new Error('BTC RPC env vars not configured'));
-      return;
-    }
-
-    const payload = JSON.stringify({
-      jsonrpc: '1.0',
-      id: method,
-      method,
-      params,
-    });
-
-    const req = http.request(
-      {
-        protocol: 'http:',
-        hostname: BTC_RPC_ONION,
-        port: BTC_RPC_PORT,
-        method: 'POST',
-        path: '/',
-        agent: bitcoinRpcAgent,
-        timeout: BTC_RPC_TIMEOUT_MS,
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(payload),
-          Authorization: `Basic ${Buffer.from(`${BTC_RPC_USER}:${BTC_RPC_PASS}`).toString('base64')}`,
-        },
-      },
-      (res) => {
-        let body = '';
-
-        res.setEncoding('utf8');
-        res.on('data', (chunk) => {
-          body += chunk;
-        });
-        res.on('end', () => {
-          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-            reject(new Error(`Bitcoin RPC HTTP ${res.statusCode}`));
-            return;
-          }
-
-          try {
-            const parsed = JSON.parse(body);
-            if (parsed?.error) {
-              reject(new Error(`Bitcoin RPC error: ${JSON.stringify(parsed.error)}`));
-              return;
-            }
-            resolve(parsed?.result);
-          } catch (error) {
-            reject(error);
-          }
-        });
-      }
-    );
-
-    req.on('timeout', () => {
-      req.destroy(new Error(`Bitcoin RPC timeout after ${BTC_RPC_TIMEOUT_MS}ms`));
-    });
-    req.on('error', reject);
-    req.write(payload);
-    req.end();
-  });
-}
-
-async function pollBitcoinRpcMempool() {
-  if (bitcoinRpcPollInFlight) return;
-  bitcoinRpcPollInFlight = true;
-
-  try {
-    const data = await fetchBitcoinRpc('getmempoolinfo');
-    const ts = Date.now();
-
-    setCacheAt(
-      BTC_RPC_CACHE_KEY,
-      {
-        ok: true,
-        ts,
-        data,
-      },
-      new Date(ts).toISOString()
-    );
-
-    bitcoinRpcLastError = null;
-  } catch (e) {
-    bitcoinRpcLastError = e instanceof Error ? e.message : String(e);
-    console.warn(`[rpc] bitcoin-core mempool poll failed: ${bitcoinRpcLastError}`);
-  } finally {
-    bitcoinRpcPollInFlight = false;
-  }
-}
-
-function startBitcoinRpcPolling() {
-  if (!hasBitcoinRpcConfig()) {
-    console.warn('[rpc] BTC RPC polling disabled: set BTC_RPC_ONION, BTC_RPC_USER and BTC_RPC_PASS');
-    return;
-  }
-
-  console.log(`[rpc] Bitcoin Core mempool polling via socks5h://${TOR_SOCKS_HOST}:${TOR_SOCKS_PORT} every ${BTC_RPC_POLL_INTERVAL_MS}ms`);
-  pollBitcoinRpcMempool().catch((e) => console.warn(`[rpc] initial bitcoin-core mempool poll failed: ${e.message}`));
-  setInterval(() => {
-    pollBitcoinRpcMempool().catch((e) => console.warn(`[rpc] bitcoin-core mempool poll failed: ${e.message}`));
-  }, BTC_RPC_POLL_INTERVAL_MS);
 }
 
 function scheduleMempoolSpaceReconnect() {
@@ -694,24 +575,48 @@ async function scrapeAll() {
 //  Express API
 // ═══════════════════════════════════════════════
 const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', true);
 
-// Middleware: CORS for Vercel
-app.use((_req, res, next) => {
-  res.set('Access-Control-Allow-Origin', '*');
-  res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.set('Access-Control-Allow-Headers', 'Content-Type');
+// Middleware: force HTTPS for public host + set HSTS on secure requests
+app.use((req, res, next) => {
+  const host = (req.headers.host || '').split(':')[0].toLowerCase();
+  const isSecure = req.secure || req.get('x-forwarded-proto') === 'https';
+
+  if (host === HTTPS_REDIRECT_HOST && !isSecure) {
+    return res.redirect(308, `https://${HTTPS_REDIRECT_HOST}${req.originalUrl}`);
+  }
+
+  if (isSecure) {
+    res.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+  }
+
+  next();
+});
+
+// Middleware: restrictive CORS allowlist
+app.use((req, res, next) => {
+  const origin = req.get('origin');
+  if (origin && CORS_ALLOWED_ORIGINS.has(origin)) {
+    res.set('Access-Control-Allow-Origin', origin);
+    res.set('Vary', 'Origin');
+    res.set('Access-Control-Allow-Methods', 'GET,OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Content-Type');
+  }
+
+  if (req.method === 'OPTIONS') {
+    if (origin && !CORS_ALLOWED_ORIGINS.has(origin)) {
+      return res.status(403).json({ error: 'origin not allowed' });
+    }
+    return res.sendStatus(204);
+  }
+
   next();
 });
 
 // Health check
 app.get('/health', (_req, res) => {
-  const keys = [...cache.keys()];
-  const status = {};
-  for (const key of keys) {
-    const entry = cached(key);
-    status[key] = entry ? { updatedAt: entry.updatedAt, hasData: Boolean(entry.data) } : null;
-  }
-  res.json({ status: 'ok', uptime: process.uptime(), caches: status });
+  res.json({ status: 'ok' });
 });
 
 // Generic handler for cached scrape data
@@ -747,25 +652,8 @@ app.get('/api/scrape/newhedge-global-assets', serveCached('newhedge-global-asset
 // 5. CompaniesMarketCap gold
 app.get('/api/scrape/companiesmarketcap-gold', serveCached('companiesmarketcap-gold'));
 
-// 6. Bitcoin Core mempool via Tor RPC
-app.get('/api/scrape/bitcoin-core-mempool', (_req, res) => {
-  const entry = cached(BTC_RPC_CACHE_KEY);
-  if (!entry?.data) {
-    res.status(503).json({ ok: false, error: bitcoinRpcLastError || 'bitcoin rpc not yet reachable' });
-    return;
-  }
 
-  res.json({
-    ...entry.data,
-    _meta: {
-      cachedAt: entry.updatedAt,
-      scraper: 'satoshi-scraper',
-      rpcMethod: 'getmempoolinfo',
-    },
-  });
-});
-
-// 7. Mempool.space memory usage via websocket stats
+// 6. Mempool.space memory usage via websocket stats
 app.get('/api/scrape/mempool-space-memory-usage', (_req, res) => {
   const entry = cached(MEMPOOL_SPACE_CACHE_KEY);
   if (!entry?.data) {
@@ -784,7 +672,7 @@ app.get('/api/scrape/mempool-space-memory-usage', (_req, res) => {
   });
 });
 
-// 8. Mempool Knots raw init-data snapshot JSON
+// 7. Mempool Knots raw init-data snapshot JSON
 app.get('/api/scrape/mempool-knots-init-data-json', (_req, res) => {
   const entry = cached(MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY);
   if (!entry?.data) {
@@ -803,7 +691,7 @@ app.get('/api/scrape/mempool-knots-init-data-json', (_req, res) => {
   });
 });
 
-// 9. Mempool Knots memory usage relay
+// 8. Mempool Knots memory usage relay
 app.get('/api/scrape/mempool-knots-memory-usage', (_req, res) => {
   const entry = cached(MEMPOOL_KNOTS_CACHE_KEY);
   if (!entry?.data) {
@@ -821,6 +709,29 @@ app.get('/api/scrape/mempool-knots-memory-usage', (_req, res) => {
       fetchUrl: mempoolKnotsInitDataUrl(),
     },
   });
+});
+
+
+// 9. Compatibility: relay Knots init-data under public API path
+app.get('/api/public/mempool/node', (_req, res) => {
+  const entry = cached(MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY);
+  if (!entry?.data?.data) {
+    res.status(503).json({ ok: false, error: mempoolKnotsLastError || 'mempool knots init-data not yet available' });
+    return;
+  }
+
+  res.json(entry.data.data);
+});
+
+// 10. Compatibility: expose Knots-like init-data route from this API
+app.get('/api/v1/init-data', (_req, res) => {
+  const entry = cached(MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY);
+  if (!entry?.data?.data) {
+    res.status(503).json({ ok: false, error: mempoolKnotsLastError || 'mempool knots init-data not yet available' });
+    return;
+  }
+
+  res.json(entry.data.data);
 });
 
 // Manual refresh trigger
@@ -874,10 +785,11 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log('     GET /api/scrape/bitnodes-nodes');
   console.log('     GET /api/scrape/newhedge-global-assets');
   console.log('     GET /api/scrape/companiesmarketcap-gold');
-  console.log('     GET /api/scrape/bitcoin-core-mempool');
   console.log('     GET /api/scrape/mempool-space-memory-usage');
   console.log('     GET /api/scrape/mempool-knots-init-data-json');
   console.log('     GET /api/scrape/mempool-knots-memory-usage');
+  console.log('     GET /api/public/mempool/node');
+  console.log('     GET /api/v1/init-data');
   console.log('     GET /api/scrape/refresh');
   console.log('\n   Cron schedules:');
   console.log('     investing-currencies  : every 60s');
@@ -885,7 +797,6 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log('     bitnodes-nodes        : 06:05 and 18:05 UTC');
   console.log('     newhedge-global-assets: every hour');
   console.log('     companiesmarketcap-gold: every 15 min');
-  console.log(`     bitcoin-core-mempool  : every ${BTC_RPC_POLL_INTERVAL_MS}ms via Tor RPC`);
   console.log(`     mempool-space-memory-usage: realtime via WS (reconnect ${MEMPOOL_SPACE_RECONNECT_MS}ms)`);
   console.log(`     mempool-knots-init-data-json: snapshot json every ${MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS}ms via local HTTP`);
   console.log(`     mempool-knots-memory-usage: relay cached json snapshot`);
@@ -893,7 +804,6 @@ app.listen(PORT, '0.0.0.0', async () => {
 
   await ensureCacheDir();
   await warmUpFromDisk();
-  startBitcoinRpcPolling();
   startMempoolSpaceStream();
   startMempoolKnotsSnapshotLoop();
   console.log('\n   Running initial scrape...\n');
