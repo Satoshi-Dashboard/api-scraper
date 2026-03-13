@@ -38,7 +38,24 @@ const CORS_ALLOWED_ORIGINS = new Set(
     .map((origin) => origin.trim())
     .filter(Boolean)
 );
+const STARTUP_REQUIRED_KEYS = [
+  'investing-currencies',
+  'bitinfocharts-richlist',
+  'bitnodes-nodes',
+  'newhedge-global-assets',
+  'companiesmarketcap-gold',
+];
 
+const ENDPOINT_CACHE_CONTROL = {
+  'investing-currencies': { sMaxAge: 30, swr: 60 },
+  'bitinfocharts-richlist': { sMaxAge: 3600, swr: 7200 },
+  'bitnodes-nodes': { sMaxAge: 21600, swr: 3600 },
+  'newhedge-global-assets': { sMaxAge: 3600, swr: 7200 },
+  'companiesmarketcap-gold': { sMaxAge: 900, swr: 1800 },
+  [MEMPOOL_SPACE_CACHE_KEY]: { sMaxAge: 5, swr: 20 },
+  [MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY]: { sMaxAge: 1, swr: 3 },
+  [MEMPOOL_KNOTS_CACHE_KEY]: { sMaxAge: 1, swr: 3 },
+};
 
 let mempoolSpaceLastError = null;
 let mempoolSpaceReconnectTimer = null;
@@ -107,6 +124,29 @@ function setCacheAt(key, data, updatedAt) {
     data,
     updatedAt,
   });
+}
+
+function setPublicCacheHeaders(res, policy) {
+  if (!policy) return;
+  res.set('Cache-Control', `public, s-maxage=${policy.sMaxAge}, stale-while-revalidate=${policy.swr}`);
+}
+
+function hasCachedData(key) {
+  const entry = cached(key);
+  return Boolean(entry?.data);
+}
+
+function getReadinessStatus() {
+  const readyKeys = STARTUP_REQUIRED_KEYS.filter((key) => hasCachedData(key));
+  return {
+    ready: readyKeys.length === STARTUP_REQUIRED_KEYS.length,
+    readyKeys,
+    missingKeys: STARTUP_REQUIRED_KEYS.filter((key) => !readyKeys.includes(key)),
+  };
+}
+
+function nextIntervalRunAt(intervalMs) {
+  return new Date(Date.now() + intervalMs);
 }
 
 // ─────────────────────────────────────────────
@@ -338,7 +378,9 @@ async function scrapeInvestingCurrencies() {
   console.log('[scrape] investing.com currencies ...');
   const html = await fetchText(INVESTING_URL);
   console.log(`[scrape] investing.com → ${html.length} bytes`);
-  setCache('investing-currencies', { html, source: 'investing.com', url: INVESTING_URL });
+  const data = { html, source: 'investing.com', url: INVESTING_URL };
+  setCache('investing-currencies', data);
+  await writeDiskCache('investing-currencies', data, nextIntervalRunAt(60_000));
 }
 
 // ═══════════════════════════════════════════════
@@ -405,12 +447,13 @@ async function scrapeBitnodes() {
     apiError = e instanceof Error ? e.message : String(e);
   }
 
-  // Always try HTML scrape as well (for fallback data)
-  try {
-    nodesHtml = await fetchText(BITNODES_NODES_PAGE_URL);
-    console.log(`[scrape] bitnodes.io HTML → ${nodesHtml.length} bytes`);
-  } catch (e) {
-    console.warn(`[scrape] bitnodes.io HTML fallback failed: ${e.message}`);
+  if (!apiData || !snapshotData) {
+    try {
+      nodesHtml = await fetchText(BITNODES_NODES_PAGE_URL);
+      console.log(`[scrape] bitnodes.io HTML → ${nodesHtml.length} bytes`);
+    } catch (e) {
+      console.warn(`[scrape] bitnodes.io HTML fallback failed: ${e.message}`);
+    }
   }
 
   const result = {
@@ -462,12 +505,14 @@ async function scrapeNewhedge() {
   }
 
   if (markdown) {
-    setCache('newhedge-global-assets', {
+    const data = {
       html: markdown,
       source: 'newhedge.io',
       url: NEWHEDGE_URL,
       fetchUrl: NEWHEDGE_JINA_URL,
-    });
+    };
+    setCache('newhedge-global-assets', data);
+    await writeDiskCache('newhedge-global-assets', data, nextIntervalRunAt(60 * 60_000));
   }
 }
 
@@ -519,7 +564,7 @@ async function scrapeCompaniesMarketCapGold() {
   const details = parseCompaniesMarketCapGoldDetails(goldHtml);
   const summary = parseCompaniesMarketCapGoldToday(assetsHtml);
 
-  setCache('companiesmarketcap-gold', {
+  const data = {
     source: 'companiesmarketcap.com',
     id: summary.id,
     marketCap: details.marketCap,
@@ -527,14 +572,24 @@ async function scrapeCompaniesMarketCapGold() {
     changeTodayPct: summary.changeTodayPct,
     url: COMPANIESMARKETCAP_GOLD_URL,
     assetsUrl: COMPANIESMARKETCAP_ASSETS_URL,
-  });
+  };
+  setCache('companiesmarketcap-gold', data);
+  await writeDiskCache('companiesmarketcap-gold', data, nextIntervalRunAt(15 * 60_000));
 }
 
 // ═══════════════════════════════════════════════
 //  Disk cache warm-up (runs at startup)
 // ═══════════════════════════════════════════════
 async function warmUpFromDisk() {
-  const persistedKeys = ['bitinfocharts-richlist', 'bitnodes-nodes', MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY, MEMPOOL_KNOTS_CACHE_KEY];
+  const persistedKeys = [
+    'investing-currencies',
+    'bitinfocharts-richlist',
+    'bitnodes-nodes',
+    'newhedge-global-assets',
+    'companiesmarketcap-gold',
+    MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY,
+    MEMPOOL_KNOTS_CACHE_KEY,
+  ];
   for (const key of persistedKeys) {
     const entry = await readDiskCache(key);
     if (entry?.data) {
@@ -562,13 +617,16 @@ async function scrapeAll() {
     { name: 'companiesmarketcap-gold', fn: scrapeCompaniesMarketCapGold },
   ];
 
-  for (const job of jobs) {
-    try {
-      await job.fn();
-    } catch (e) {
-      console.error(`[scrape] ${job.name} FAILED: ${e.message}`);
+  const results = await Promise.allSettled(jobs.map(async (job) => {
+    await job.fn();
+    return job.name;
+  }));
+
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      console.error(`[scrape] ${jobs[index].name} FAILED: ${result.reason?.message || result.reason}`);
     }
-  }
+  });
 }
 
 // ═══════════════════════════════════════════════
@@ -619,9 +677,19 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
 });
 
+app.get('/readyz', (_req, res) => {
+  const readiness = getReadinessStatus();
+  if (!readiness.ready) {
+    res.status(503).json({ status: 'warming', ...readiness });
+    return;
+  }
+  res.json({ status: 'ready', ...readiness });
+});
+
 // Generic handler for cached scrape data
 function serveCached(key) {
   return (_req, res) => {
+    setPublicCacheHeaders(res, ENDPOINT_CACHE_CONTROL[key]);
     const entry = cached(key);
     if (!entry || !entry.data) {
       res.status(503).json({ error: `${key} not yet scraped`, availableAt: 'wait for next cron cycle' });
@@ -652,9 +720,9 @@ app.get('/api/scrape/newhedge-global-assets', serveCached('newhedge-global-asset
 // 5. CompaniesMarketCap gold
 app.get('/api/scrape/companiesmarketcap-gold', serveCached('companiesmarketcap-gold'));
 
-
 // 6. Mempool.space memory usage via websocket stats
 app.get('/api/scrape/mempool-space-memory-usage', (_req, res) => {
+  setPublicCacheHeaders(res, ENDPOINT_CACHE_CONTROL[MEMPOOL_SPACE_CACHE_KEY]);
   const entry = cached(MEMPOOL_SPACE_CACHE_KEY);
   if (!entry?.data) {
     res.status(503).json({ ok: false, error: mempoolSpaceLastError || 'mempool.space data not yet available' });
@@ -674,6 +742,7 @@ app.get('/api/scrape/mempool-space-memory-usage', (_req, res) => {
 
 // 7. Mempool Knots raw init-data snapshot JSON
 app.get('/api/scrape/mempool-knots-init-data-json', (_req, res) => {
+  setPublicCacheHeaders(res, ENDPOINT_CACHE_CONTROL[MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY]);
   const entry = cached(MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY);
   if (!entry?.data) {
     res.status(503).json({ ok: false, error: mempoolKnotsLastError || 'mempool knots init-data not yet available' });
@@ -693,6 +762,7 @@ app.get('/api/scrape/mempool-knots-init-data-json', (_req, res) => {
 
 // 8. Mempool Knots memory usage relay
 app.get('/api/scrape/mempool-knots-memory-usage', (_req, res) => {
+  setPublicCacheHeaders(res, ENDPOINT_CACHE_CONTROL[MEMPOOL_KNOTS_CACHE_KEY]);
   const entry = cached(MEMPOOL_KNOTS_CACHE_KEY);
   if (!entry?.data) {
     res.status(503).json({ ok: false, error: mempoolKnotsLastError || 'mempool knots data not yet available' });
@@ -780,6 +850,7 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log(`\n🛰️  Satoshi Scraper running on http://0.0.0.0:${PORT}`);
   console.log('   Endpoints:');
   console.log('     GET /health');
+  console.log('     GET /readyz');
   console.log('     GET /api/scrape/investing-currencies');
   console.log('     GET /api/scrape/bitinfocharts-richlist');
   console.log('     GET /api/scrape/bitnodes-nodes');
@@ -808,6 +879,11 @@ app.listen(PORT, '0.0.0.0', async () => {
   startMempoolKnotsSnapshotLoop();
   console.log('\n   Running initial scrape...\n');
 
-  await scrapeAll();
-  console.log('\n✅ Initial scrape complete. Cron schedules active.\n');
+  scrapeAll()
+    .then(() => {
+      console.log('\n✅ Initial scrape complete. Cron schedules active.\n');
+    })
+    .catch((error) => {
+      console.error(`\n❌ Initial scrape failed: ${error.message}\n`);
+    });
 });

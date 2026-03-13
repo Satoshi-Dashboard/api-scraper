@@ -33,6 +33,14 @@ Satoshi Dashboard necesita extraer datos de sitios web que bloquean las IPs de V
 - `GET /api/public/mempool/node`
 - `GET /api/v1/init-data`
 - `GET /health`
+- `GET /readyz`
+
+## Operacion y tiempo de primera respuesta
+
+- El scraper ahora reutiliza snapshots persistidos en disco para `investing-currencies`, `bitinfocharts-richlist`, `bitnodes-nodes`, `newhedge-global-assets` y `companiesmarketcap-gold`.
+- El arranque inicial ejecuta los scrapes HTTP de forma paralela para reducir el tiempo hasta tener datos reales disponibles tras reinicios.
+- `GET /health` indica que el proceso esta vivo; `GET /readyz` indica que los caches minimos para el dashboard ya estan cargados.
+- Los endpoints servidos desde cache publican `Cache-Control` con `s-maxage` y `stale-while-revalidate` para que el dashboard y el edge reutilicen snapshots reales ya obtenidos.
 
 ## Despliegue en Portainer (Vía GitHub)
 

@@ -73,8 +73,17 @@ Cache-Control: public, s-maxage=<TTL>, stale-while-revalidate=<TTL*2>
 - Error en lectura: continuar normalmente (primer arranque)
 
 Scrapers que deben persistir actualmente:
+- `investing-currencies` (60s; reduce espera tras reinicios y evita 503 al dashboard)
 - `bitinfocharts-richlist` (cron diario)
 - `bitnodes-nodes` (cron 2×/día)
+- `newhedge-global-assets` (cron horario)
+- `companiesmarketcap-gold` (cron 15min)
+
+## Regla de readiness operativa
+
+- `GET /health` = proceso vivo.
+- `GET /readyz` = caches minimos del dashboard ya cargados desde disco o scrape inicial.
+- No tratar `health` como garantia de datos listos para consumo si `readyz` todavia responde `503`.
 
 ---
 
