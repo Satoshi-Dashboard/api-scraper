@@ -26,18 +26,20 @@ const FETCH_TIMEOUT_MS = 20_000;
 const CACHE_DIR = path.resolve(process.cwd(), 'cache');
 const MEMPOOL_SPACE_WS_URL = process.env.MEMPOOL_SPACE_WS_URL || 'wss://mempool.space/api/v1/ws';
 const MEMPOOL_SPACE_RECONNECT_MS = Number(process.env.MEMPOOL_SPACE_RECONNECT_MS || 1000);
+const MEMPOOL_SPACE_STALE_MS = Number(process.env.MEMPOOL_SPACE_STALE_MS || 30_000);
 const MEMPOOL_SPACE_CACHE_KEY = 'mempool-space-memory-usage';
-const MEMPOOL_KNOTS_HTTP_BASE = process.env.MEMPOOL_KNOTS_HTTP_BASE || 'https://knotapi.zatobox.io';
+const MEMPOOL_KNOTS_HTTP_BASE = process.env.MEMPOOL_KNOTS_HTTP_BASE || 'https://upstream.example.com';
 const MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS = Number(process.env.MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS || 1000);
 const MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY = 'mempool-knots-init-data-json';
 const MEMPOOL_KNOTS_CACHE_KEY = 'mempool-knots-memory-usage';
-const HTTPS_REDIRECT_HOST = (process.env.HTTPS_REDIRECT_HOST || 'api.zatobox.io').toLowerCase();
+const HTTPS_REDIRECT_HOST = (process.env.HTTPS_REDIRECT_HOST || 'api.example.com').toLowerCase();
 const CORS_ALLOWED_ORIGINS = new Set(
-  (process.env.CORS_ALLOWED_ORIGINS || 'https://zatobox.io,https://www.zatobox.io')
+  (process.env.CORS_ALLOWED_ORIGINS || 'https://example.com,https://www.example.com')
     .split(',')
     .map((origin) => origin.trim())
     .filter(Boolean)
 );
+const SCRAPE_REFRESH_TOKEN = process.env.SCRAPE_REFRESH_TOKEN || '';
 const STARTUP_REQUIRED_KEYS = [
   'investing-currencies',
   'bitinfocharts-richlist',
@@ -58,13 +60,17 @@ const ENDPOINT_CACHE_CONTROL = {
 };
 
 let mempoolSpaceLastError = null;
+let mempoolSpaceLastMessageAt = 0;
 let mempoolSpaceReconnectTimer = null;
 let mempoolSpaceSocket = null;
+let mempoolSpaceStaleWatcher = null;
 let mempoolKnotsLastError = null;
 let mempoolKnotsSnapshotTimer = null;
 let mempoolKnotsLatestData = null;
 let mempoolKnotsLatestInitData = null;
 let mempoolKnotsHttpPollInFlight = false;
+let mempoolKnotsLastPersistedSignature = null;
+let mempoolKnotsInitDataLastPersistedSignature = null;
 
 // ─────────────────────────────────────────────
 //  Disk persistence helpers
@@ -133,7 +139,13 @@ function setPublicCacheHeaders(res, policy) {
 
 function hasCachedData(key) {
   const entry = cached(key);
-  return Boolean(entry?.data);
+  if (!entry?.data) return false;
+
+  if (key === 'bitnodes-nodes') {
+    return Boolean(entry.data.apiData || entry.data.snapshotData || entry.data.nodesHtml);
+  }
+
+  return true;
 }
 
 function getReadinessStatus() {
@@ -207,6 +219,19 @@ function scheduleMempoolSpaceReconnect() {
   }, MEMPOOL_SPACE_RECONNECT_MS);
 }
 
+function isMempoolSpaceDataStale() {
+  return !mempoolSpaceLastMessageAt || Date.now() - mempoolSpaceLastMessageAt > MEMPOOL_SPACE_STALE_MS;
+}
+
+function ensureMempoolSpaceFreshness() {
+  if (!mempoolSpaceSocket || mempoolSpaceSocket.readyState !== WebSocket.OPEN || !isMempoolSpaceDataStale()) {
+    return;
+  }
+
+  mempoolSpaceLastError = `mempool.space websocket stale for more than ${MEMPOOL_SPACE_STALE_MS}ms`;
+  mempoolSpaceSocket.terminate();
+}
+
 function handleMempoolSpaceMessage(raw) {
   let message;
   try {
@@ -235,6 +260,7 @@ function handleMempoolSpaceMessage(raw) {
     wsUrl: MEMPOOL_SPACE_WS_URL,
   });
 
+  mempoolSpaceLastMessageAt = Date.now();
   mempoolSpaceLastError = null;
 }
 
@@ -248,6 +274,7 @@ function startMempoolSpaceStream() {
   mempoolSpaceSocket = ws;
 
   ws.addEventListener('open', () => {
+    mempoolSpaceLastError = null;
     ws.send(JSON.stringify({ action: 'want', data: ['stats'] }));
   });
 
@@ -268,8 +295,17 @@ function startMempoolSpaceStream() {
   });
 }
 
+function startMempoolSpaceStaleWatcher() {
+  if (mempoolSpaceStaleWatcher) return;
+
+  const intervalMs = Math.max(1000, Math.min(5000, Math.floor(MEMPOOL_SPACE_STALE_MS / 2)));
+  mempoolSpaceStaleWatcher = setInterval(() => {
+    ensureMempoolSpaceFreshness();
+  }, intervalMs);
+}
+
 function nextMempoolKnotsRunAt() {
-  return new Date(Date.now() + 1000);
+  return new Date(Date.now() + MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS);
 }
 
 function mempoolKnotsInitDataUrl() {
@@ -290,25 +326,31 @@ function buildMempoolKnotsPayload(mempoolInfo) {
     bytes: mempoolInfo.bytes ?? null,
     size: mempoolInfo.size ?? null,
     mempoolInfo,
-    url: MEMPOOL_KNOTS_HTTP_BASE,
-    fetchUrl: mempoolKnotsInitDataUrl(),
   };
 }
 
 async function persistMempoolKnotsSnapshot() {
   if (!mempoolKnotsLatestData) return;
 
+  const signature = JSON.stringify(mempoolKnotsLatestData);
+  if (signature === mempoolKnotsLastPersistedSignature) return;
+
   const nowIso = new Date().toISOString();
   setCacheAt(MEMPOOL_KNOTS_CACHE_KEY, mempoolKnotsLatestData, nowIso);
   await writeDiskCache(MEMPOOL_KNOTS_CACHE_KEY, mempoolKnotsLatestData, nextMempoolKnotsRunAt());
+  mempoolKnotsLastPersistedSignature = signature;
 }
 
 async function persistMempoolKnotsInitDataSnapshot() {
   if (!mempoolKnotsLatestInitData) return;
 
+  const signature = JSON.stringify(mempoolKnotsLatestInitData);
+  if (signature === mempoolKnotsInitDataLastPersistedSignature) return;
+
   const nowIso = new Date().toISOString();
   setCacheAt(MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY, mempoolKnotsLatestInitData, nowIso);
   await writeDiskCache(MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY, mempoolKnotsLatestInitData, nextMempoolKnotsRunAt());
+  mempoolKnotsInitDataLastPersistedSignature = signature;
 }
 
 async function pollMempoolKnotsHttp() {
@@ -325,8 +367,6 @@ async function pollMempoolKnotsHttp() {
     mempoolKnotsLatestInitData = {
       source: 'mempool knots',
       kind: 'init-data',
-      url: MEMPOOL_KNOTS_HTTP_BASE,
-      fetchUrl: mempoolKnotsInitDataUrl(),
       data: initData,
     };
 
@@ -705,6 +745,15 @@ function serveCached(key) {
   };
 }
 
+function getRefreshTokenFromRequest(req) {
+  const authHeader = req.get('authorization');
+  if (authHeader?.startsWith('Bearer ')) {
+    return authHeader.slice('Bearer '.length).trim();
+  }
+
+  return (req.get('x-refresh-token') || '').trim();
+}
+
 // 1. Investing.com currencies
 app.get('/api/scrape/investing-currencies', serveCached('investing-currencies'));
 
@@ -724,7 +773,7 @@ app.get('/api/scrape/companiesmarketcap-gold', serveCached('companiesmarketcap-g
 app.get('/api/scrape/mempool-space-memory-usage', (_req, res) => {
   setPublicCacheHeaders(res, ENDPOINT_CACHE_CONTROL[MEMPOOL_SPACE_CACHE_KEY]);
   const entry = cached(MEMPOOL_SPACE_CACHE_KEY);
-  if (!entry?.data) {
+  if (!entry?.data || isMempoolSpaceDataStale()) {
     res.status(503).json({ ok: false, error: mempoolSpaceLastError || 'mempool.space data not yet available' });
     return;
   }
@@ -755,7 +804,6 @@ app.get('/api/scrape/mempool-knots-init-data-json', (_req, res) => {
       cachedAt: entry.updatedAt,
       scraper: 'satoshi-scraper',
       transport: 'http-poll',
-      fetchUrl: mempoolKnotsInitDataUrl(),
     },
   });
 });
@@ -776,7 +824,6 @@ app.get('/api/scrape/mempool-knots-memory-usage', (_req, res) => {
       scraper: 'satoshi-scraper',
       transport: 'snapshot-relay',
       sourceCache: MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY,
-      fetchUrl: mempoolKnotsInitDataUrl(),
     },
   });
 });
@@ -784,6 +831,7 @@ app.get('/api/scrape/mempool-knots-memory-usage', (_req, res) => {
 
 // 9. Compatibility: relay Knots init-data under public API path
 app.get('/api/public/mempool/node', (_req, res) => {
+  setPublicCacheHeaders(res, ENDPOINT_CACHE_CONTROL[MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY]);
   const entry = cached(MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY);
   if (!entry?.data?.data) {
     res.status(503).json({ ok: false, error: mempoolKnotsLastError || 'mempool knots init-data not yet available' });
@@ -795,6 +843,7 @@ app.get('/api/public/mempool/node', (_req, res) => {
 
 // 10. Compatibility: expose Knots-like init-data route from this API
 app.get('/api/v1/init-data', (_req, res) => {
+  setPublicCacheHeaders(res, ENDPOINT_CACHE_CONTROL[MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY]);
   const entry = cached(MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY);
   if (!entry?.data?.data) {
     res.status(503).json({ ok: false, error: mempoolKnotsLastError || 'mempool knots init-data not yet available' });
@@ -805,7 +854,17 @@ app.get('/api/v1/init-data', (_req, res) => {
 });
 
 // Manual refresh trigger
-app.get('/api/scrape/refresh', async (_req, res) => {
+app.get('/api/scrape/refresh', async (req, res) => {
+  if (!SCRAPE_REFRESH_TOKEN) {
+    res.status(403).json({ error: 'manual refresh disabled' });
+    return;
+  }
+
+  if (getRefreshTokenFromRequest(req) !== SCRAPE_REFRESH_TOKEN) {
+    res.status(401).json({ error: 'invalid refresh token' });
+    return;
+  }
+
   try {
     await scrapeAll();
     res.json({ status: 'refreshed', timestamp: new Date().toISOString() });
@@ -876,6 +935,7 @@ app.listen(PORT, '0.0.0.0', async () => {
   await ensureCacheDir();
   await warmUpFromDisk();
   startMempoolSpaceStream();
+  startMempoolSpaceStaleWatcher();
   startMempoolKnotsSnapshotLoop();
   console.log('\n   Running initial scrape...\n');
 

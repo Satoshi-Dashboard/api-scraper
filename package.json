@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "description": "Self-hosted scraper proxy for Satoshi Dashboard — runs on UmbrelOS/Docker",
   "scripts": {
     "start": "node server.js"
