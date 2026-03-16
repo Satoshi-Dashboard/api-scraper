@@ -20,6 +20,7 @@ import cron from 'node-cron';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import WebSocket from 'ws';
+import { buildFredHousePricePayload, FRED_CACHE_KEY } from './fred.js';
 
 const PORT = Number(process.env.PORT || 9119);
 const FETCH_TIMEOUT_MS = 20_000;
@@ -57,6 +58,7 @@ const ENDPOINT_CACHE_CONTROL = {
   [MEMPOOL_SPACE_CACHE_KEY]: { sMaxAge: 5, swr: 20 },
   [MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY]: { sMaxAge: 1, swr: 3 },
   [MEMPOOL_KNOTS_CACHE_KEY]: { sMaxAge: 1, swr: 3 },
+  [FRED_CACHE_KEY]: { sMaxAge: 86400, swr: 86400 }, // FRED updates quarterly, cache 24h
 };
 
 let mempoolSpaceLastError = null;
@@ -617,6 +619,23 @@ async function scrapeCompaniesMarketCapGold() {
   await writeDiskCache('companiesmarketcap-gold', data, nextIntervalRunAt(15 * 60_000));
 }
 
+// ── FRED house price (US Median Home Price) ─────────────────────────────────
+async function scrapeFredHousePrice() {
+  console.log('[scrape] FRED house price (MSPUS) ...');
+
+  try {
+    const payload = await buildFredHousePricePayload();
+
+    console.log(`[scrape] FRED house price → ${payload.data.points.length} points`);
+
+    setCache(FRED_CACHE_KEY, payload.data);
+    await writeDiskCache(FRED_CACHE_KEY, payload.data, nextIntervalRunAt(24 * 60 * 60 * 1000)); // 24h cache
+  } catch (err) {
+    console.error('[scrape] FRED house price failed:', err.message);
+    throw err;
+  }
+}
+
 // ═══════════════════════════════════════════════
 //  Disk cache warm-up (runs at startup)
 // ═══════════════════════════════════════════════
@@ -629,6 +648,7 @@ async function warmUpFromDisk() {
     'companiesmarketcap-gold',
     MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY,
     MEMPOOL_KNOTS_CACHE_KEY,
+    FRED_CACHE_KEY,
   ];
   for (const key of persistedKeys) {
     const entry = await readDiskCache(key);
@@ -655,6 +675,7 @@ async function scrapeAll() {
     { name: 'bitnodes-nodes', fn: scrapeBitnodes },
     { name: 'newhedge-global-assets', fn: scrapeNewhedge },
     { name: 'companiesmarketcap-gold', fn: scrapeCompaniesMarketCapGold },
+    { name: 'fred-house-price', fn: scrapeFredHousePrice },
   ];
 
   const results = await Promise.allSettled(jobs.map(async (job) => {
@@ -768,6 +789,45 @@ app.get('/api/scrape/newhedge-global-assets', serveCached('newhedge-global-asset
 
 // 5. CompaniesMarketCap gold
 app.get('/api/scrape/companiesmarketcap-gold', serveCached('companiesmarketcap-gold'));
+app.get('/api/scrape/fred-house-price', serveCached(FRED_CACHE_KEY));
+
+// FRED MSPUS endpoint (direct FRED API)
+app.get('/api/fred/mspus', async (_req, res) => {
+  const apiKey = process.env.FRED_API_KEY || '';
+  const params = new URLSearchParams({
+    series_id: 'MSPUS',
+    sort_order: 'asc',
+    limit: '100',
+    file_type: 'json',
+    ...(apiKey ? { api_key: apiKey } : {}),
+  });
+
+  try {
+    const response = await fetch(`https://api.stlouisfed.org/fred/series/observations?${params}`, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    if (!response.ok) {
+      res.status(502).json({ error: 'FRED unavailable' });
+      return;
+    }
+
+    const json = await response.json();
+    const observations = (json.observations ?? [])
+      .filter(o => o.value !== '.' && o.value != null && !isNaN(Number(o.value)))
+      .map(o => ({ date: o.date, value: Number(o.value) }));
+
+    res.json({
+      source: 'FRED — St. Louis Fed',
+      source_url: 'https://fred.stlouisfed.org/series/MSPUS',
+      updated_at: new Date().toISOString(),
+      observations,
+    });
+  } catch (e) {
+    res.status(502).json({ error: 'FRED unavailable' });
+  }
+});
 
 // 6. Mempool.space memory usage via websocket stats
 app.get('/api/scrape/mempool-space-memory-usage', (_req, res) => {
@@ -900,6 +960,11 @@ cron.schedule('0 * * * *', () => {
 // CompaniesMarketCap gold: every 15 minutes (source data is delayed, but intraday)
 cron.schedule('*/15 * * * *', () => {
   scrapeCompaniesMarketCapGold().catch((e) => console.error('[cron] companiesmarketcap gold:', e.message));
+});
+
+// FRED house price: once per day at 03:00 UTC (FRED updates quarterly)
+cron.schedule('0 3 * * *', () => {
+  scrapeFredHousePrice().catch((e) => console.error('[cron] fred-house-price:', e.message));
 });
 
 // ═══════════════════════════════════════════════
