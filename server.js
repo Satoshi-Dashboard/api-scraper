@@ -934,12 +934,17 @@ app.get('/api/scrape/companiesmarketcap-gold', serveCached('companiesmarketcap-g
 app.get('/api/scrape/fred-house-price', serveCached(FRED_CACHE_KEY));
 
 // FRED MSPUS endpoint (direct FRED API)
-app.get('/api/fred/mspus', async (_req, res) => {
+app.get('/api/fred/mspus', async (req, res) => {
   const apiKey = process.env.FRED_API_KEY || '';
+  const { from, limit } = req.query;
+
+  const sortOrder = limit ? 'desc' : 'asc';
+  const limitValue = limit ? String(limit) : '1000';
+
   const params = new URLSearchParams({
     series_id: 'MSPUS',
-    sort_order: 'asc',
-    limit: '100',
+    sort_order: sortOrder,
+    limit: limitValue,
     file_type: 'json',
     ...(apiKey ? { api_key: apiKey } : {}),
   });
@@ -956,9 +961,17 @@ app.get('/api/fred/mspus', async (_req, res) => {
     }
 
     const json = await response.json();
-    const observations = (json.observations ?? [])
+    let observations = (json.observations ?? [])
       .filter(o => o.value !== '.' && o.value != null && !isNaN(Number(o.value)))
       .map(o => ({ date: o.date, value: Number(o.value) }));
+
+    if (from) {
+      observations = observations.filter(o => o.date >= from);
+    }
+
+    if (!limit) {
+      observations.sort((a, b) => a.date.localeCompare(b.date));
+    }
 
     res.json({
       source: 'FRED — St. Louis Fed',
