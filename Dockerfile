@@ -5,7 +5,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-COPY server.js fred.js ./
+COPY server.js ./
 
 EXPOSE 9119
 
