@@ -8,6 +8,7 @@ services:
     environment:
       - PORT=9119
       - NODE_ENV=production
+      - FRED_API_KEY=${FRED_API_KEY}
       - MEMPOOL_SPACE_WS_URL=${MEMPOOL_SPACE_WS_URL:-wss://mempool.space/api/v1/ws}
       - MEMPOOL_SPACE_RECONNECT_MS=${MEMPOOL_SPACE_RECONNECT_MS:-1000}
       - MEMPOOL_SPACE_STALE_MS=${MEMPOOL_SPACE_STALE_MS:-30000}
