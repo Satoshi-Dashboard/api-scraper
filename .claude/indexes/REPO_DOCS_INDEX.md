@@ -17,6 +17,7 @@ source_status: canonical-local
 ## Canonical Repo Notes
 
 - [[repo/PROJECT_STRUCTURE]] - repo layout, file ownership, and operational hotspots.
+- [[repo/MEMPOOL_SPACE_API_HANDOFF]] - handoff names, routes, and subagent prompts for the mempool.space API relay.
 
 ## Compatibility Bridges Outside The Vault
 

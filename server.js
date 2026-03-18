@@ -10,9 +10,11 @@
  *   3. bitnodes.io     → /api/scrape/bitnodes-nodes  (API + HTML fallback)
  *   4. newhedge.io     → /api/scrape/newhedge-global-assets
  *   5. companiesmarketcap.com → /api/scrape/companiesmarketcap-gold
- *   6. mempool.space ws → /api/scrape/mempool-space-memory-usage
- *   7. mempool knots json → /api/scrape/mempool-knots-init-data-json
- *   8. mempool knots usage → /api/scrape/mempool-knots-memory-usage
+ *   6. mempool.space memory → /api/scrape/mempool-space-memory-usage
+ *   7. mempool.space fees → /api/scrape/mempool-space-transaction-fees
+ *   8. mempool.space mempool → /api/scrape/mempool-space-unconfirmed-transactions
+ *   9. mempool knots json → /api/scrape/mempool-knots-init-data-json
+ *  10. mempool knots usage → /api/scrape/mempool-knots-memory-usage
  */
 
 import express from 'express';
@@ -170,7 +172,11 @@ const CACHE_DIR = path.resolve(process.cwd(), 'cache');
 const MEMPOOL_SPACE_WS_URL = process.env.MEMPOOL_SPACE_WS_URL || 'wss://mempool.space/api/v1/ws';
 const MEMPOOL_SPACE_RECONNECT_MS = Number(process.env.MEMPOOL_SPACE_RECONNECT_MS || 1000);
 const MEMPOOL_SPACE_STALE_MS = Number(process.env.MEMPOOL_SPACE_STALE_MS || 30_000);
+const MEMPOOL_SPACE_MEMPOOL_URL = 'https://mempool.space/api/mempool';
+const MEMPOOL_SPACE_MEMPOOL_POLL_INTERVAL_MS = Number(process.env.MEMPOOL_SPACE_MEMPOOL_POLL_INTERVAL_MS || 5000);
 const MEMPOOL_SPACE_CACHE_KEY = 'mempool-space-memory-usage';
+const MEMPOOL_SPACE_FEES_CACHE_KEY = 'mempool-space-transaction-fees';
+const MEMPOOL_SPACE_UNCONFIRMED_CACHE_KEY = 'mempool-space-unconfirmed-transactions';
 const MEMPOOL_KNOTS_HTTP_BASE = process.env.MEMPOOL_KNOTS_HTTP_BASE || 'https://upstream.example.com';
 const MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS = Number(process.env.MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS || 1000);
 const MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY = 'mempool-knots-init-data-json';
@@ -198,6 +204,8 @@ const ENDPOINT_CACHE_CONTROL = {
   'newhedge-global-assets': { sMaxAge: 3600, swr: 7200 },
   'companiesmarketcap-gold': { sMaxAge: 900, swr: 1800 },
   [MEMPOOL_SPACE_CACHE_KEY]: { sMaxAge: 5, swr: 20 },
+  [MEMPOOL_SPACE_FEES_CACHE_KEY]: { sMaxAge: 5, swr: 20 },
+  [MEMPOOL_SPACE_UNCONFIRMED_CACHE_KEY]: { sMaxAge: 5, swr: 20 },
   [MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY]: { sMaxAge: 1, swr: 3 },
   [MEMPOOL_KNOTS_CACHE_KEY]: { sMaxAge: 1, swr: 3 },
   [FRED_CACHE_KEY]: { sMaxAge: 86400, swr: 86400 }, // FRED updates quarterly, cache 24h
@@ -208,6 +216,9 @@ let mempoolSpaceLastMessageAt = 0;
 let mempoolSpaceReconnectTimer = null;
 let mempoolSpaceSocket = null;
 let mempoolSpaceStaleWatcher = null;
+let mempoolSpaceMempoolLastError = null;
+let mempoolSpaceMempoolPollTimer = null;
+let mempoolSpaceMempoolPollInFlight = false;
 let mempoolKnotsLastError = null;
 let mempoolKnotsSnapshotTimer = null;
 let mempoolKnotsLatestData = null;
@@ -376,6 +387,17 @@ function ensureMempoolSpaceFreshness() {
   mempoolSpaceSocket.terminate();
 }
 
+function isCacheEntryStale(entry, staleMs) {
+  if (!entry?.updatedAt) return true;
+  const updatedAtMs = Date.parse(entry.updatedAt);
+  if (Number.isNaN(updatedAtMs)) return true;
+  return Date.now() - updatedAtMs > staleMs;
+}
+
+function formatTxCountLabel(count) {
+  return `${count.toLocaleString('en-US')} TXs`;
+}
+
 function handleMempoolSpaceMessage(raw) {
   let message;
   try {
@@ -385,27 +407,101 @@ function handleMempoolSpaceMessage(raw) {
   }
 
   const mempoolInfo = message?.mempoolInfo;
-  if (!mempoolInfo || typeof mempoolInfo.usage !== 'number') return;
+  const fees = message?.fees;
+  let handled = false;
 
-  const usagePct = typeof mempoolInfo.maxmempool === 'number' && mempoolInfo.maxmempool > 0
-    ? Number(((mempoolInfo.usage / mempoolInfo.maxmempool) * 100).toFixed(2))
-    : null;
+  if (mempoolInfo && typeof mempoolInfo.usage === 'number') {
+    const usagePct = typeof mempoolInfo.maxmempool === 'number' && mempoolInfo.maxmempool > 0
+      ? Number(((mempoolInfo.usage / mempoolInfo.maxmempool) * 100).toFixed(2))
+      : null;
 
-  setCache(MEMPOOL_SPACE_CACHE_KEY, {
-    source: 'mempool.space',
-    metric: 'memory-usage',
-    usage: mempoolInfo.usage,
-    maxmempool: mempoolInfo.maxmempool ?? null,
-    usagePct,
-    bytes: mempoolInfo.bytes ?? null,
-    size: mempoolInfo.size ?? null,
-    mempoolInfo,
-    url: 'https://mempool.space/',
-    wsUrl: MEMPOOL_SPACE_WS_URL,
-  });
+    setCache(MEMPOOL_SPACE_CACHE_KEY, {
+      source: 'mempool.space',
+      provider: 'api.zatobox.io',
+      name: 'Memory Usage',
+      metric: 'memory-usage',
+      usage: mempoolInfo.usage,
+      maxmempool: mempoolInfo.maxmempool ?? null,
+      usagePct,
+      bytes: mempoolInfo.bytes ?? null,
+      size: mempoolInfo.size ?? null,
+      mempoolInfo,
+      url: 'https://mempool.space/',
+      wsUrl: MEMPOOL_SPACE_WS_URL,
+    });
+    handled = true;
+  }
+
+  if (fees && typeof fees.fastestFee === 'number') {
+    setCache(MEMPOOL_SPACE_FEES_CACHE_KEY, {
+      source: 'mempool.space',
+      provider: 'api.zatobox.io',
+      name: 'Transaction Fees',
+      metric: 'transaction-fees',
+      fastestFee: fees.fastestFee,
+      halfHourFee: fees.halfHourFee ?? null,
+      hourFee: fees.hourFee ?? null,
+      economyFee: fees.economyFee ?? null,
+      minimumFee: fees.minimumFee ?? null,
+      fees,
+      url: 'https://mempool.space/',
+      wsUrl: MEMPOOL_SPACE_WS_URL,
+    });
+    handled = true;
+  }
+
+  if (!handled) return;
 
   mempoolSpaceLastMessageAt = Date.now();
   mempoolSpaceLastError = null;
+}
+
+async function pollMempoolSpaceMempoolHttp() {
+  if (mempoolSpaceMempoolPollInFlight) return;
+  mempoolSpaceMempoolPollInFlight = true;
+
+  try {
+    const mempool = await fetchJson(MEMPOOL_SPACE_MEMPOOL_URL, { timeoutMs: 4000 });
+    if (typeof mempool?.count !== 'number') {
+      throw new Error('count missing in mempool overview');
+    }
+
+    setCache(MEMPOOL_SPACE_UNCONFIRMED_CACHE_KEY, {
+      source: 'mempool.space',
+      provider: 'api.zatobox.io',
+      name: 'Unconfirmed TXs',
+      metric: 'unconfirmed-transactions',
+      count: mempool.count,
+      displayValue: formatTxCountLabel(mempool.count),
+      vsize: mempool.vsize ?? null,
+      totalFee: mempool.total_fee ?? null,
+      feeHistogram: Array.isArray(mempool.fee_histogram) ? mempool.fee_histogram : [],
+      mempool,
+      url: 'https://mempool.space/',
+      apiUrl: MEMPOOL_SPACE_MEMPOOL_URL,
+    });
+
+    mempoolSpaceMempoolLastError = null;
+  } catch (e) {
+    mempoolSpaceMempoolLastError = e instanceof Error ? e.message : String(e);
+    console.warn(`[http] mempool.space mempool poll failed: ${mempoolSpaceMempoolLastError}`);
+  } finally {
+    mempoolSpaceMempoolPollInFlight = false;
+  }
+}
+
+function startMempoolSpaceMempoolPollLoop() {
+  if (mempoolSpaceMempoolPollTimer) return;
+
+  pollMempoolSpaceMempoolHttp().catch((e) => {
+    console.warn(`[http] Failed initial mempool.space mempool poll: ${e.message}`);
+  });
+
+  mempoolSpaceMempoolPollTimer = setInterval(() => {
+    pollMempoolSpaceMempoolHttp().catch((e) => {
+      console.warn(`[http] Failed mempool.space mempool poll: ${e.message}`);
+    });
+  }, MEMPOOL_SPACE_MEMPOOL_POLL_INTERVAL_MS);
 }
 
 function startMempoolSpaceStream() {
@@ -908,6 +1004,27 @@ function serveCached(key) {
   };
 }
 
+function serveMempoolSpaceStatsCached(key) {
+  return (_req, res) => {
+    setPublicCacheHeaders(res, ENDPOINT_CACHE_CONTROL[key]);
+    const entry = cached(key);
+    if (!entry?.data || isMempoolSpaceDataStale()) {
+      res.status(503).json({ ok: false, error: mempoolSpaceLastError || 'mempool.space data not yet available' });
+      return;
+    }
+
+    res.json({
+      ...entry.data,
+      _meta: {
+        cachedAt: entry.updatedAt,
+        scraper: 'satoshi-scraper',
+        transport: 'websocket',
+        subscription: 'stats',
+      },
+    });
+  };
+}
+
 function getRefreshTokenFromRequest(req) {
   const authHeader = req.get('authorization');
   if (authHeader?.startsWith('Bearer ')) {
@@ -985,11 +1102,18 @@ app.get('/api/fred/mspus', async (req, res) => {
 });
 
 // 6. Mempool.space memory usage via websocket stats
-app.get('/api/scrape/mempool-space-memory-usage', (_req, res) => {
-  setPublicCacheHeaders(res, ENDPOINT_CACHE_CONTROL[MEMPOOL_SPACE_CACHE_KEY]);
-  const entry = cached(MEMPOOL_SPACE_CACHE_KEY);
-  if (!entry?.data || isMempoolSpaceDataStale()) {
-    res.status(503).json({ ok: false, error: mempoolSpaceLastError || 'mempool.space data not yet available' });
+app.get('/api/scrape/mempool-space-memory-usage', serveMempoolSpaceStatsCached(MEMPOOL_SPACE_CACHE_KEY));
+
+// 7. Mempool.space transaction fees via websocket stats
+app.get('/api/scrape/mempool-space-transaction-fees', serveMempoolSpaceStatsCached(MEMPOOL_SPACE_FEES_CACHE_KEY));
+
+// 8. Mempool.space unconfirmed tx count via HTTP mempool overview
+app.get('/api/scrape/mempool-space-unconfirmed-transactions', (_req, res) => {
+  setPublicCacheHeaders(res, ENDPOINT_CACHE_CONTROL[MEMPOOL_SPACE_UNCONFIRMED_CACHE_KEY]);
+  const entry = cached(MEMPOOL_SPACE_UNCONFIRMED_CACHE_KEY);
+  const staleMs = Math.max(15_000, MEMPOOL_SPACE_MEMPOOL_POLL_INTERVAL_MS * 3);
+  if (!entry?.data || isCacheEntryStale(entry, staleMs)) {
+    res.status(503).json({ ok: false, error: mempoolSpaceMempoolLastError || 'mempool.space mempool data not yet available' });
     return;
   }
 
@@ -998,13 +1122,13 @@ app.get('/api/scrape/mempool-space-memory-usage', (_req, res) => {
     _meta: {
       cachedAt: entry.updatedAt,
       scraper: 'satoshi-scraper',
-      transport: 'websocket',
-      subscription: 'stats',
+      transport: 'http-poll',
+      pollIntervalMs: MEMPOOL_SPACE_MEMPOOL_POLL_INTERVAL_MS,
     },
   });
 });
 
-// 7. Mempool Knots raw init-data snapshot JSON
+// 9. Mempool Knots raw init-data snapshot JSON
 app.get('/api/scrape/mempool-knots-init-data-json', (_req, res) => {
   setPublicCacheHeaders(res, ENDPOINT_CACHE_CONTROL[MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY]);
   const entry = cached(MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY);
@@ -1023,7 +1147,7 @@ app.get('/api/scrape/mempool-knots-init-data-json', (_req, res) => {
   });
 });
 
-// 8. Mempool Knots memory usage relay
+// 10. Mempool Knots memory usage relay
 app.get('/api/scrape/mempool-knots-memory-usage', (_req, res) => {
   setPublicCacheHeaders(res, ENDPOINT_CACHE_CONTROL[MEMPOOL_KNOTS_CACHE_KEY]);
   const entry = cached(MEMPOOL_KNOTS_CACHE_KEY);
@@ -1044,7 +1168,7 @@ app.get('/api/scrape/mempool-knots-memory-usage', (_req, res) => {
 });
 
 
-// 9. Compatibility: relay Knots init-data under public API path
+// 11. Compatibility: relay Knots init-data under public API path
 app.get('/api/public/mempool/node', (_req, res) => {
   setPublicCacheHeaders(res, ENDPOINT_CACHE_CONTROL[MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY]);
   const entry = cached(MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY);
@@ -1056,7 +1180,7 @@ app.get('/api/public/mempool/node', (_req, res) => {
   res.json(entry.data.data);
 });
 
-// 10. Compatibility: expose Knots-like init-data route from this API
+// 12. Compatibility: expose Knots-like init-data route from this API
 app.get('/api/v1/init-data', (_req, res) => {
   setPublicCacheHeaders(res, ENDPOINT_CACHE_CONTROL[MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY]);
   const entry = cached(MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY);
@@ -1136,6 +1260,8 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log('     GET /api/scrape/newhedge-global-assets');
   console.log('     GET /api/scrape/companiesmarketcap-gold');
   console.log('     GET /api/scrape/mempool-space-memory-usage');
+  console.log('     GET /api/scrape/mempool-space-transaction-fees');
+  console.log('     GET /api/scrape/mempool-space-unconfirmed-transactions');
   console.log('     GET /api/scrape/mempool-knots-init-data-json');
   console.log('     GET /api/scrape/mempool-knots-memory-usage');
   console.log('     GET /api/public/mempool/node');
@@ -1148,6 +1274,8 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log('     newhedge-global-assets: every hour');
   console.log('     companiesmarketcap-gold: every 15 min');
   console.log(`     mempool-space-memory-usage: realtime via WS (reconnect ${MEMPOOL_SPACE_RECONNECT_MS}ms)`);
+  console.log(`     mempool-space-transaction-fees: realtime via WS (reconnect ${MEMPOOL_SPACE_RECONNECT_MS}ms)`);
+  console.log(`     mempool-space-unconfirmed-transactions: every ${MEMPOOL_SPACE_MEMPOOL_POLL_INTERVAL_MS}ms via HTTP`);
   console.log(`     mempool-knots-init-data-json: snapshot json every ${MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS}ms via local HTTP`);
   console.log(`     mempool-knots-memory-usage: relay cached json snapshot`);
   console.log('\n   Loading cached data from disk...\n');
@@ -1156,6 +1284,7 @@ app.listen(PORT, '0.0.0.0', async () => {
   await warmUpFromDisk();
   startMempoolSpaceStream();
   startMempoolSpaceStaleWatcher();
+  startMempoolSpaceMempoolPollLoop();
   startMempoolKnotsSnapshotLoop();
   console.log('\n   Running initial scrape...\n');
 
