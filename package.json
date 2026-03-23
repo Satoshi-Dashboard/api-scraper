@@ -8,7 +8,8 @@
   },
   "description": "Self-hosted scraper proxy for Satoshi Dashboard — runs on UmbrelOS/Docker",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "sync:johoe:supabase": "node scripts/sync-johoe-datasets.mjs"
   },
   "dependencies": {
     "express": "^4.21.0",

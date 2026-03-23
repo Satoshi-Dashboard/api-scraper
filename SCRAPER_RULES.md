@@ -165,3 +165,11 @@ Al crear un nuevo endpoint, seguir estos pasos en orden:
 - **Accion Realizada/Correccion:** Se agrego la familia Johoe como fuente Tier 2 con polling cada 60s, TTL honestos y persistencia pensada para operar dentro del stack Docker/Portainer o sobre SQL gestionado externo.
 - **Nueva/Modificada Regla o Directriz:** Las fuentes historicas cuasi realtime con formato estructurado tipo JSONP pueden integrarse server-side con polling de 60s, cache publica de 60s y almacenamiento SQL durable para evitar dependencia directa del frontend sobre el upstream externo.
 - **Justificacion:** Permite que ZatoBox consuma datos minuto a minuto desde su propia infraestructura con menor fragilidad operativa y mejor control del historico.
+
+- **Fecha de la Actualizacion:** `2026-03-23`
+- **Archivo(s) Afectado(s):** `SCRAPER_RULES.md`, `README.md`, `server.js`, `docker-compose.yml`, `.env.example`, `.env`, `supabase/migrations/20260323220000_split_johoe_queue_tables.sql`, `scripts/sync-johoe-datasets.mjs`
+- **Tipo de Evento/Contexto:** Rediseño de persistencia Johoe para Supabase Free con tablas rolling y tabla diaria persistente
+- **Descripcion del Evento Original:** La primera version guardaba snapshots Johoe en una sola tabla y el historico reciente en resolución minuto a minuto podia crecer demasiado para el límite de `500 MB` del plan Free de Supabase.
+- **Accion Realizada/Correccion:** Se dividio Johoe en tres datasets: `all.js` persistente diario, `24h.js` rolling y `30d.js` rolling, manteniendo la API pública sobre la resolución adecuada de cada ventana.
+- **Nueva/Modificada Regla o Directriz:** Cuando una fuente ofrece ventanas historicas nativas de distinta resolución, preferir tablas rolling que espejen exactamente la ventana upstream y reservar el crecimiento persistente solo para el dataset de largo plazo.
+- **Justificacion:** Mantiene estable el peso de la base, reduce complejidad de compactación y conserva una API propia utilizable por ZatoBox sin depender directamente del frontend de Johoe.

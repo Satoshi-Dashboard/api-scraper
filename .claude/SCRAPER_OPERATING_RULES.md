@@ -36,6 +36,7 @@ This note bridges the canonical scraper policy into the local agent vault.
 12. JSONP or JavaScript data feeds must be parsed as inert data with strict wrapper validation and `JSON.parse`; never execute upstream payloads with `eval`, `Function`, or equivalent.
 13. If minute-level canonical history must survive host loss or unstable local Docker state, prefer managed external Postgres over a local stateful database container; keep on-disk cache only as warm-up support.
 14. Provider-supplied Postgres connection URIs may contain raw or bracketed passwords copied from dashboards; parse them safely on the backend instead of assuming strict URL encoding.
+15. When an upstream already exposes bounded historical windows (for example `24h.js`, `30d.js`, `all.js`), mirror those windows into separate tables instead of forcing a single ever-growing canonical table.
 
 ## Related Notes
 
@@ -91,3 +92,11 @@ This note bridges the canonical scraper policy into the local agent vault.
 - **Accion Realizada/Correccion:** Se agrego parsing tolerante para `DATABASE_URL` y se documentaron ejemplos de URI directa compatibles con el scraper.
 - **Nueva/Modificada Regla o Directriz:** Las credenciales remotas copiadas desde dashboards de proveedores deben aceptarse de forma segura aunque vengan en formato raw/bracketed, sin ejecutar ni reinterpretar contenido fuera de un parser controlado.
 - **Justificacion:** Reduce friccion operativa al configurar proveedores gestionados y evita fallos silenciosos por encoding incompleto de passwords.
+
+- **Fecha de la Actualizacion:** `2026-03-23`
+- **Archivo(s) Afectado(s):** `.claude/SCRAPER_OPERATING_RULES.md`, `SCRAPER_RULES.md`, `README.md`, `server.js`, `docker-compose.yml`, `.env.example`, `.env`, `supabase/migrations/20260323220000_split_johoe_queue_tables.sql`, `scripts/sync-johoe-datasets.mjs`
+- **Tipo de Evento/Contexto:** Persistencia Johoe dividida en datasets rolling y dataset diario persistente
+- **Descripcion del Evento Original:** Usar una sola tabla para snapshots Johoe mezclaba resoluciones distintas y hacia crecer innecesariamente la base de Supabase Free, pese a que el upstream ya ofrece ventanas `24h`, `30d` y `all` con semánticas diferentes.
+- **Accion Realizada/Correccion:** Se separo la persistencia en tres tablas (`24h` rolling, `30d` rolling y `all` diario persistente), se añadió una migración específica y se creó un script de resincronización manual para Supabase.
+- **Nueva/Modificada Regla o Directriz:** Si el upstream ya modela ventanas acotadas, la persistencia interna debe respetar esas ventanas con tablas separadas y evitar historiales infinitos innecesarios.
+- **Justificacion:** Conserva el contrato API, estabiliza el peso en Supabase Free y reduce la complejidad operativa respecto a compactaciones posteriores.
