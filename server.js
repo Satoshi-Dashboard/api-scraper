@@ -21,6 +21,7 @@ import express from 'express';
 import cron from 'node-cron';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
+import { Pool } from 'pg';
 import WebSocket from 'ws';
 
 const FRED_BASE = 'https://api.stlouisfed.org/fred/series/observations';
@@ -166,6 +167,91 @@ async function buildFredHousePricePayload() {
   };
 }
 
+function parseBooleanEnv(value, defaultValue = false) {
+  if (value == null || value === '') return defaultValue;
+  return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
+}
+
+function safeDecodeURIComponent(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function parseDatabaseUrl(connectionString) {
+  if (!connectionString) {
+    throw new Error('DATABASE_URL is missing');
+  }
+
+  try {
+    const parsed = new URL(connectionString);
+    return {
+      host: parsed.hostname,
+      port: Number(parsed.port || 5432),
+      database: safeDecodeURIComponent(parsed.pathname.replace(/^\//, '') || 'postgres'),
+      user: safeDecodeURIComponent(parsed.username),
+      password: safeDecodeURIComponent(parsed.password),
+    };
+  } catch {
+    const schemeMatch = connectionString.match(/^postgres(?:ql)?:\/\//i);
+    if (!schemeMatch) {
+      throw new Error('Unsupported DATABASE_URL format');
+    }
+
+    const remainder = connectionString.slice(schemeMatch[0].length);
+    const slashIndex = remainder.indexOf('/');
+    if (slashIndex === -1) {
+      throw new Error('DATABASE_URL is missing a database path');
+    }
+
+    const authority = remainder.slice(0, slashIndex);
+    const pathAndQuery = remainder.slice(slashIndex + 1);
+    const atIndex = authority.lastIndexOf('@');
+    if (atIndex === -1) {
+      throw new Error('DATABASE_URL is missing credentials');
+    }
+
+    const credentials = authority.slice(0, atIndex);
+    const hostPort = authority.slice(atIndex + 1);
+    const credentialSeparatorIndex = credentials.indexOf(':');
+    if (credentialSeparatorIndex === -1) {
+      throw new Error('DATABASE_URL is missing a password separator');
+    }
+
+    let password = credentials.slice(credentialSeparatorIndex + 1);
+    let passwordWasBracketed = false;
+    if (password.startsWith('[') && password.endsWith(']')) {
+      password = password.slice(1, -1);
+      passwordWasBracketed = true;
+    }
+
+    const portSeparatorIndex = hostPort.lastIndexOf(':');
+    if (portSeparatorIndex === -1) {
+      throw new Error('DATABASE_URL is missing a port');
+    }
+
+    const queryIndex = pathAndQuery.indexOf('?');
+    const databasePath = queryIndex === -1 ? pathAndQuery : pathAndQuery.slice(0, queryIndex);
+
+    return {
+      host: hostPort.slice(0, portSeparatorIndex),
+      port: Number(hostPort.slice(portSeparatorIndex + 1) || 5432),
+      database: safeDecodeURIComponent(databasePath || 'postgres'),
+      user: safeDecodeURIComponent(credentials.slice(0, credentialSeparatorIndex)),
+      password: passwordWasBracketed ? password : safeDecodeURIComponent(password),
+    };
+  }
+}
+
+function buildDatabasePoolConfig(connectionString) {
+  return {
+    ...parseDatabaseUrl(connectionString),
+    ssl: JOHOE_DB_SSL ? { rejectUnauthorized: false } : false,
+  };
+}
+
 const PORT = Number(process.env.PORT || 9119);
 const FETCH_TIMEOUT_MS = 20_000;
 const CACHE_DIR = path.resolve(process.cwd(), 'cache');
@@ -181,6 +267,27 @@ const MEMPOOL_KNOTS_HTTP_BASE = process.env.MEMPOOL_KNOTS_HTTP_BASE || 'https://
 const MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS = Number(process.env.MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS || 1000);
 const MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY = 'mempool-knots-init-data-json';
 const MEMPOOL_KNOTS_CACHE_KEY = 'mempool-knots-memory-usage';
+const JOHOE_BASE_URL = (process.env.JOHOE_BASE_URL || 'https://johoe.jochen-hoenicke.de/queue/2').replace(/\/$/, '');
+const JOHOE_NETWORK = process.env.JOHOE_NETWORK || 'btc';
+const JOHOE_CACHE_KEY = 'johoe-btc-queue-latest';
+const JOHOE_HISTORY_CACHE_KEY = 'johoe-btc-queue-history';
+const JOHOE_POLL_INTERVAL_MS = Number(process.env.JOHOE_POLL_INTERVAL_MS || 60_000);
+const JOHOE_STALE_MS = Number(process.env.JOHOE_STALE_MS || 180_000);
+const JOHOE_LOOKBACK_SECONDS = Number(process.env.JOHOE_LOOKBACK_SECONDS || 600);
+const JOHOE_LOOKAHEAD_SECONDS = Number(process.env.JOHOE_LOOKAHEAD_SECONDS || 600);
+const JOHOE_BOOTSTRAP_ENABLED = parseBooleanEnv(process.env.JOHOE_BOOTSTRAP_ENABLED, true);
+const JOHOE_BOOTSTRAP_RANGE = process.env.JOHOE_BOOTSTRAP_RANGE || 'all';
+const JOHOE_MAX_HISTORY_POINTS = Number(process.env.JOHOE_MAX_HISTORY_POINTS || 1440);
+const JOHOE_HISTORY_LIMIT_DEFAULT = Number(process.env.JOHOE_HISTORY_LIMIT_DEFAULT || 1440);
+const JOHOE_DB_ENABLED = parseBooleanEnv(process.env.JOHOE_DB_ENABLED, true);
+const JOHOE_DB_SSL = parseBooleanEnv(process.env.JOHOE_DB_SSL, false);
+const DATABASE_URL = process.env.DATABASE_URL || '';
+const JOHOE_FORWARD_ENABLED = parseBooleanEnv(process.env.JOHOE_FORWARD_ENABLED, false);
+const JOHOE_FORWARD_URL = process.env.JOHOE_FORWARD_URL || '';
+const JOHOE_FORWARD_TOKEN = process.env.JOHOE_FORWARD_TOKEN || '';
+const JOHOE_FORWARD_BATCH_SIZE = Number(process.env.JOHOE_FORWARD_BATCH_SIZE || 10);
+const JOHOE_FORWARD_INTERVAL_MS = Number(process.env.JOHOE_FORWARD_INTERVAL_MS || 15_000);
+const JOHOE_FORWARD_TIMEOUT_MS = Number(process.env.JOHOE_FORWARD_TIMEOUT_MS || 10_000);
 const HTTPS_REDIRECT_HOST = (process.env.HTTPS_REDIRECT_HOST || 'api.example.com').toLowerCase();
 const CORS_ALLOWED_ORIGINS = new Set(
   (process.env.CORS_ALLOWED_ORIGINS || 'https://example.com,https://www.example.com')
@@ -208,6 +315,8 @@ const ENDPOINT_CACHE_CONTROL = {
   [MEMPOOL_SPACE_UNCONFIRMED_CACHE_KEY]: { sMaxAge: 5, swr: 20 },
   [MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY]: { sMaxAge: 1, swr: 3 },
   [MEMPOOL_KNOTS_CACHE_KEY]: { sMaxAge: 1, swr: 3 },
+  [JOHOE_CACHE_KEY]: { sMaxAge: 60, swr: 180 },
+  [JOHOE_HISTORY_CACHE_KEY]: { sMaxAge: 60, swr: 180 },
   [FRED_CACHE_KEY]: { sMaxAge: 86400, swr: 86400 }, // FRED updates quarterly, cache 24h
 };
 
@@ -226,6 +335,15 @@ let mempoolKnotsLatestInitData = null;
 let mempoolKnotsHttpPollInFlight = false;
 let mempoolKnotsLastPersistedSignature = null;
 let mempoolKnotsInitDataLastPersistedSignature = null;
+let johoeLastError = null;
+let johoePollTimer = null;
+let johoePollInFlight = false;
+let johoeLastSuccessfulSyncAt = 0;
+let johoeDbPool = null;
+let johoeDatabaseReady = false;
+let johoeBootstrapPromise = null;
+let johoeForwardTimer = null;
+let johoeForwardInFlight = false;
 
 // ─────────────────────────────────────────────
 //  Disk persistence helpers
@@ -650,6 +768,573 @@ function startMempoolKnotsSnapshotLoop() {
 }
 
 // ═══════════════════════════════════════════════
+//  11. JOHOE MEMPOOL QUEUE — BTC count / weight / fee
+// ═══════════════════════════════════════════════
+function sumNumericArray(values) {
+  if (!Array.isArray(values)) return 0;
+  return values.reduce((sum, value) => {
+    const numericValue = Number(value);
+    return sum + (Number.isFinite(numericValue) ? numericValue : 0);
+  }, 0);
+}
+
+function normalizeJohoeBuckets(values) {
+  if (!Array.isArray(values)) return [];
+  return values.map((value) => {
+    const numericValue = Number(value);
+    return Number.isFinite(numericValue) && numericValue >= 0 ? numericValue : 0;
+  });
+}
+
+function normalizeJohoePoint(row) {
+  if (!Array.isArray(row) || row.length < 4) return null;
+
+  const timestamp = Number(row[0]);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return null;
+
+  const countBuckets = normalizeJohoeBuckets(row[1]);
+  const weightBuckets = normalizeJohoeBuckets(row[2]);
+  const feeBuckets = normalizeJohoeBuckets(row[3]);
+
+  return {
+    source: 'johoe',
+    network: JOHOE_NETWORK,
+    timestamp,
+    date: new Date(timestamp * 1000).toISOString(),
+    countBuckets,
+    weightBuckets,
+    feeBuckets,
+    countTotal: sumNumericArray(countBuckets),
+    weightTotal: sumNumericArray(weightBuckets),
+    feeTotal: sumNumericArray(feeBuckets),
+  };
+}
+
+function parseJohoeJsonp(text) {
+  const match = text.trim().match(/^call\(([\s\S]*)\);?$/);
+  if (!match?.[1]) {
+    throw new Error('Unexpected Johoe response format');
+  }
+
+  const parsed = JSON.parse(match[1]);
+  if (!Array.isArray(parsed)) {
+    throw new Error('Johoe payload is not an array');
+  }
+
+  return parsed
+    .map(normalizeJohoePoint)
+    .filter(Boolean)
+    .sort((a, b) => a.timestamp - b.timestamp);
+}
+
+function nextJohoeRunAt() {
+  return new Date(Date.now() + JOHOE_POLL_INTERVAL_MS);
+}
+
+function buildJohoeHistoryPayload(points) {
+  return {
+    source: 'johoe',
+    provider: 'api.zatobox.io',
+    network: JOHOE_NETWORK,
+    points,
+  };
+}
+
+function buildJohoeForwardPayload(point) {
+  return {
+    source: 'johoe',
+    provider: 'api.zatobox.io',
+    network: JOHOE_NETWORK,
+    timestamp: point.timestamp,
+    date: point.date,
+    countBuckets: point.countBuckets,
+    weightBuckets: point.weightBuckets,
+    feeBuckets: point.feeBuckets,
+    latest: {
+      count: point.countTotal,
+      weight: point.weightTotal,
+      fee: point.feeTotal,
+    },
+  };
+}
+
+function getJohoeEntryAgeMs(entry) {
+  if (!entry?.updatedAt) return Number.POSITIVE_INFINITY;
+  const updatedAtMs = Date.parse(entry.updatedAt);
+  if (Number.isNaN(updatedAtMs)) return Number.POSITIVE_INFINITY;
+  return Date.now() - updatedAtMs;
+}
+
+function isJohoeEntryStale(entry) {
+  return getJohoeEntryAgeMs(entry) > JOHOE_STALE_MS;
+}
+
+function mapJohoeRow(row) {
+  const timestamp = Number(row.snapshot_ts_unix);
+  return {
+    source: 'johoe',
+    network: JOHOE_NETWORK,
+    timestamp,
+    date: row.snapshot_ts ? new Date(row.snapshot_ts).toISOString() : new Date(timestamp * 1000).toISOString(),
+    countBuckets: normalizeJohoeBuckets(row.count_buckets),
+    weightBuckets: normalizeJohoeBuckets(row.weight_buckets),
+    feeBuckets: normalizeJohoeBuckets(row.fee_buckets),
+    countTotal: Number(row.count_total),
+    weightTotal: Number(row.weight_total),
+    feeTotal: Number(row.fee_total),
+  };
+}
+
+function updateJohoeCache(points) {
+  if (!Array.isArray(points) || !points.length) return;
+
+  const latestPoint = points[points.length - 1];
+  const historyEntry = cached(JOHOE_HISTORY_CACHE_KEY);
+  const mergedByTimestamp = new Map((historyEntry?.data?.points || []).map((point) => [point.timestamp, point]));
+
+  for (const point of points) {
+    mergedByTimestamp.set(point.timestamp, point);
+  }
+
+  const mergedPoints = Array.from(mergedByTimestamp.values())
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .slice(-JOHOE_MAX_HISTORY_POINTS);
+
+  const nowIso = new Date().toISOString();
+  setCacheAt(JOHOE_CACHE_KEY, latestPoint, nowIso);
+  setCacheAt(JOHOE_HISTORY_CACHE_KEY, buildJohoeHistoryPayload(mergedPoints), nowIso);
+  johoeLastSuccessfulSyncAt = Date.parse(nowIso);
+}
+
+async function persistJohoeCache() {
+  const latestEntry = cached(JOHOE_CACHE_KEY);
+  const historyEntry = cached(JOHOE_HISTORY_CACHE_KEY);
+
+  if (latestEntry?.data) {
+    await writeDiskCache(JOHOE_CACHE_KEY, latestEntry.data, nextJohoeRunAt());
+  }
+
+  if (historyEntry?.data) {
+    await writeDiskCache(JOHOE_HISTORY_CACHE_KEY, historyEntry.data, nextJohoeRunAt());
+  }
+}
+
+async function fetchJohoeScript(relativePath) {
+  return fetchText(`${JOHOE_BASE_URL}/${relativePath}`, {
+    headers: {
+      Accept: 'application/javascript, text/plain;q=0.9, */*;q=0.8',
+    },
+    timeoutMs: 30_000,
+  });
+}
+
+async function initJohoeDatabase() {
+  if (!JOHOE_DB_ENABLED) return;
+
+  if (!DATABASE_URL) {
+    johoeLastError = 'JOHOE_DB_ENABLED=true but DATABASE_URL is missing';
+    console.warn(`[johoe] ${johoeLastError}`);
+    return;
+  }
+
+  johoeDbPool = new Pool(buildDatabasePoolConfig(DATABASE_URL));
+
+  await johoeDbPool.query(`
+    CREATE TABLE IF NOT EXISTS johoe_btc_queue_snapshots (
+      snapshot_ts_unix BIGINT PRIMARY KEY,
+      snapshot_ts TIMESTAMPTZ NOT NULL,
+      count_buckets JSONB NOT NULL,
+      weight_buckets JSONB NOT NULL,
+      fee_buckets JSONB NOT NULL,
+      count_total BIGINT NOT NULL,
+      weight_total BIGINT NOT NULL,
+      fee_total BIGINT NOT NULL,
+      fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await johoeDbPool.query(`
+    CREATE INDEX IF NOT EXISTS idx_johoe_btc_queue_snapshots_snapshot_ts
+      ON johoe_btc_queue_snapshots (snapshot_ts DESC)
+  `);
+
+  await johoeDbPool.query(`ALTER TABLE johoe_btc_queue_snapshots ENABLE ROW LEVEL SECURITY`);
+  await johoeDbPool.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+        EXECUTE 'REVOKE ALL ON TABLE johoe_btc_queue_snapshots FROM anon';
+      END IF;
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+        EXECUTE 'REVOKE ALL ON TABLE johoe_btc_queue_snapshots FROM authenticated';
+      END IF;
+    END
+    $$;
+  `);
+
+  if (JOHOE_FORWARD_ENABLED) {
+    await johoeDbPool.query(`
+      CREATE TABLE IF NOT EXISTS johoe_forward_outbox (
+        snapshot_ts_unix BIGINT PRIMARY KEY REFERENCES johoe_btc_queue_snapshots(snapshot_ts_unix) ON DELETE CASCADE,
+        payload JSONB NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_attempt_at TIMESTAMPTZ,
+        last_error TEXT,
+        delivered_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await johoeDbPool.query(`
+      CREATE INDEX IF NOT EXISTS idx_johoe_forward_outbox_pending
+        ON johoe_forward_outbox (snapshot_ts_unix)
+        WHERE delivered_at IS NULL
+    `);
+
+    await johoeDbPool.query(`ALTER TABLE johoe_forward_outbox ENABLE ROW LEVEL SECURITY`);
+    await johoeDbPool.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+          EXECUTE 'REVOKE ALL ON TABLE johoe_forward_outbox FROM anon';
+        END IF;
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+          EXECUTE 'REVOKE ALL ON TABLE johoe_forward_outbox FROM authenticated';
+        END IF;
+      END
+      $$;
+    `);
+  }
+
+  johoeDatabaseReady = true;
+}
+
+async function getLatestJohoeTimestampFromDb() {
+  if (!johoeDatabaseReady) return 0;
+  const result = await johoeDbPool.query(`
+    SELECT snapshot_ts_unix
+    FROM johoe_btc_queue_snapshots
+    ORDER BY snapshot_ts_unix DESC
+    LIMIT 1
+  `);
+  if (!result.rows[0]?.snapshot_ts_unix) return 0;
+  return Number(result.rows[0].snapshot_ts_unix);
+}
+
+async function refreshJohoeCacheFromDb(limit = JOHOE_MAX_HISTORY_POINTS) {
+  if (!johoeDatabaseReady) return;
+
+  const result = await johoeDbPool.query(`
+    SELECT snapshot_ts_unix, snapshot_ts, count_buckets, weight_buckets, fee_buckets, count_total, weight_total, fee_total
+    FROM johoe_btc_queue_snapshots
+    ORDER BY snapshot_ts_unix DESC
+    LIMIT $1
+  `, [limit]);
+
+  if (!result.rows.length) return;
+
+  const points = result.rows.map(mapJohoeRow).reverse();
+  updateJohoeCache(points);
+  await persistJohoeCache();
+}
+
+async function readJohoeHistoryFromDb({ from = null, to = null, limit = JOHOE_HISTORY_LIMIT_DEFAULT } = {}) {
+  if (!johoeDatabaseReady) {
+    return cached(JOHOE_HISTORY_CACHE_KEY)?.data?.points || [];
+  }
+
+  const clauses = [];
+  const values = [];
+
+  if (Number.isFinite(from)) {
+    values.push(from);
+    clauses.push(`snapshot_ts_unix >= $${values.length}`);
+  }
+
+  if (Number.isFinite(to)) {
+    values.push(to);
+    clauses.push(`snapshot_ts_unix <= $${values.length}`);
+  }
+
+  values.push(limit);
+  const whereClause = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const result = await johoeDbPool.query(`
+    SELECT snapshot_ts_unix, snapshot_ts, count_buckets, weight_buckets, fee_buckets, count_total, weight_total, fee_total
+    FROM (
+      SELECT snapshot_ts_unix, snapshot_ts, count_buckets, weight_buckets, fee_buckets, count_total, weight_total, fee_total
+      FROM johoe_btc_queue_snapshots
+      ${whereClause}
+      ORDER BY snapshot_ts_unix DESC
+      LIMIT $${values.length}
+    ) AS recent
+    ORDER BY snapshot_ts_unix ASC
+  `, values);
+
+  return result.rows.map(mapJohoeRow);
+}
+
+async function upsertJohoeBatch(client, points) {
+  if (!points.length) return [];
+
+  const existingResult = await client.query(
+    'SELECT snapshot_ts_unix FROM johoe_btc_queue_snapshots WHERE snapshot_ts_unix = ANY($1::bigint[])',
+    [points.map((point) => point.timestamp)]
+  );
+  const existingTimestamps = new Set(existingResult.rows.map((row) => Number(row.snapshot_ts_unix)));
+  const newPoints = points.filter((point) => !existingTimestamps.has(point.timestamp));
+
+  const values = [];
+  const placeholders = points.map((point) => {
+    const snapshotIso = new Date(point.timestamp * 1000).toISOString();
+    const offset = values.length;
+    values.push(
+      point.timestamp,
+      snapshotIso,
+      JSON.stringify(point.countBuckets),
+      JSON.stringify(point.weightBuckets),
+      JSON.stringify(point.feeBuckets),
+      point.countTotal,
+      point.weightTotal,
+      point.feeTotal,
+      new Date().toISOString()
+    );
+    return `($${offset + 1}, $${offset + 2}::timestamptz, $${offset + 3}::jsonb, $${offset + 4}::jsonb, $${offset + 5}::jsonb, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}::timestamptz)`;
+  });
+
+  await client.query(`
+    INSERT INTO johoe_btc_queue_snapshots (
+      snapshot_ts_unix,
+      snapshot_ts,
+      count_buckets,
+      weight_buckets,
+      fee_buckets,
+      count_total,
+      weight_total,
+      fee_total,
+      fetched_at
+    )
+    VALUES ${placeholders.join(', ')}
+    ON CONFLICT (snapshot_ts_unix) DO UPDATE SET
+      snapshot_ts = EXCLUDED.snapshot_ts,
+      count_buckets = EXCLUDED.count_buckets,
+      weight_buckets = EXCLUDED.weight_buckets,
+      fee_buckets = EXCLUDED.fee_buckets,
+      count_total = EXCLUDED.count_total,
+      weight_total = EXCLUDED.weight_total,
+      fee_total = EXCLUDED.fee_total,
+      fetched_at = EXCLUDED.fetched_at
+  `, values);
+
+  if (JOHOE_FORWARD_ENABLED && newPoints.length) {
+    const outboxValues = [];
+    const outboxPlaceholders = newPoints.map((point) => {
+      const offset = outboxValues.length;
+      outboxValues.push(point.timestamp, JSON.stringify(buildJohoeForwardPayload(point)));
+      return `($${offset + 1}, $${offset + 2}::jsonb)`;
+    });
+
+    await client.query(`
+      INSERT INTO johoe_forward_outbox (snapshot_ts_unix, payload)
+      VALUES ${outboxPlaceholders.join(', ')}
+      ON CONFLICT (snapshot_ts_unix) DO NOTHING
+    `, outboxValues);
+  }
+
+  return newPoints;
+}
+
+async function storeJohoePoints(points) {
+  if (!points.length) return [];
+
+  if (!johoeDatabaseReady) {
+    updateJohoeCache(points);
+    await persistJohoeCache();
+    return points;
+  }
+
+  const client = await johoeDbPool.connect();
+  try {
+    await client.query('BEGIN');
+    const insertedPoints = [];
+    for (let index = 0; index < points.length; index += 250) {
+      const batch = points.slice(index, index + 250);
+      const batchInsertedPoints = await upsertJohoeBatch(client, batch);
+      insertedPoints.push(...batchInsertedPoints);
+    }
+    await client.query('COMMIT');
+    await refreshJohoeCacheFromDb();
+    return insertedPoints;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function bootstrapJohoeHistory() {
+  if (johoeBootstrapPromise) return johoeBootstrapPromise;
+
+  johoeBootstrapPromise = (async () => {
+    console.log(`[johoe] Bootstrapping ${JOHOE_BOOTSTRAP_RANGE} history ...`);
+    const raw = await fetchJohoeScript(`${JOHOE_BOOTSTRAP_RANGE}.js`);
+    const points = parseJohoeJsonp(raw);
+    if (!points.length) {
+      throw new Error('Johoe bootstrap returned no points');
+    }
+    await storeJohoePoints(points);
+    console.log(`[johoe] Bootstrap complete with ${points.length} points`);
+  })();
+
+  try {
+    await johoeBootstrapPromise;
+  } finally {
+    johoeBootstrapPromise = null;
+  }
+}
+
+async function pollJohoeQueue() {
+  if (johoePollInFlight) return;
+  johoePollInFlight = true;
+
+  try {
+    let lastTimestamp = johoeDatabaseReady
+      ? await getLatestJohoeTimestampFromDb()
+      : Number(cached(JOHOE_CACHE_KEY)?.data?.timestamp || 0);
+
+    if (!lastTimestamp && JOHOE_BOOTSTRAP_ENABLED) {
+      await bootstrapJohoeHistory();
+      lastTimestamp = johoeDatabaseReady
+        ? await getLatestJohoeTimestampFromDb()
+        : Number(cached(JOHOE_CACHE_KEY)?.data?.timestamp || 0);
+    }
+
+    const nowUnix = Math.floor(Date.now() / 1000);
+    const fromUnix = lastTimestamp > 0
+      ? Math.max(0, lastTimestamp - JOHOE_LOOKBACK_SECONDS)
+      : Math.max(0, nowUnix - Math.max(JOHOE_LOOKBACK_SECONDS * 6, 3600));
+    const toUnix = nowUnix + JOHOE_LOOKAHEAD_SECONDS;
+    const raw = await fetchJohoeScript(`db.php?s=${fromUnix}&e=${toUnix}&i=1`);
+    const points = parseJohoeJsonp(raw);
+
+    if (!points.length) {
+      throw new Error('Johoe incremental sync returned no points');
+    }
+
+    const insertedPoints = await storeJohoePoints(points);
+    johoeLastError = null;
+    johoeLastSuccessfulSyncAt = Date.now();
+
+    if (insertedPoints.length) {
+      console.log(`[johoe] Synced ${points.length} points (${insertedPoints.length} new)`);
+    }
+  } catch (error) {
+    johoeLastError = error instanceof Error ? error.message : String(error);
+    console.warn(`[johoe] Poll failed: ${johoeLastError}`);
+  } finally {
+    johoePollInFlight = false;
+  }
+}
+
+async function forwardJohoePayload(payload) {
+  if (!JOHOE_FORWARD_ENABLED || !JOHOE_FORWARD_URL) return;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), JOHOE_FORWARD_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(JOHOE_FORWARD_URL, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(JOHOE_FORWARD_TOKEN ? { Authorization: `Bearer ${JOHOE_FORWARD_TOKEN}` } : {}),
+        'Idempotency-Key': `johoe-${payload.timestamp}`,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      throw new Error(`ZatoBox forward failed with HTTP ${res.status}`);
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function processJohoeForwardOutbox() {
+  if (!JOHOE_FORWARD_ENABLED || !JOHOE_FORWARD_URL || !johoeDatabaseReady || johoeForwardInFlight) return;
+  johoeForwardInFlight = true;
+
+  const client = await johoeDbPool.connect();
+  try {
+    const result = await client.query(`
+      SELECT snapshot_ts_unix, payload
+      FROM johoe_forward_outbox
+      WHERE delivered_at IS NULL
+      ORDER BY snapshot_ts_unix ASC
+      LIMIT $1
+    `, [JOHOE_FORWARD_BATCH_SIZE]);
+
+    for (const row of result.rows) {
+      const snapshotTsUnix = Number(row.snapshot_ts_unix);
+      try {
+        await forwardJohoePayload(row.payload);
+        await client.query(`
+          UPDATE johoe_forward_outbox
+          SET attempts = attempts + 1,
+              last_attempt_at = NOW(),
+              last_error = NULL,
+              delivered_at = NOW()
+          WHERE snapshot_ts_unix = $1
+        `, [snapshotTsUnix]);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await client.query(`
+          UPDATE johoe_forward_outbox
+          SET attempts = attempts + 1,
+              last_attempt_at = NOW(),
+              last_error = $2
+          WHERE snapshot_ts_unix = $1
+        `, [snapshotTsUnix, message.slice(0, 1000)]);
+        console.warn(`[johoe] Forward failed for ${snapshotTsUnix}: ${message}`);
+      }
+    }
+  } finally {
+    client.release();
+    johoeForwardInFlight = false;
+  }
+}
+
+function startJohoePollingLoop() {
+  if (johoePollTimer) return;
+
+  pollJohoeQueue().catch((error) => {
+    console.warn(`[johoe] Initial poll failed: ${error.message}`);
+  });
+
+  johoePollTimer = setInterval(() => {
+    pollJohoeQueue().catch((error) => {
+      console.warn(`[johoe] Poll loop failed: ${error.message}`);
+    });
+  }, JOHOE_POLL_INTERVAL_MS);
+}
+
+function startJohoeForwardLoop() {
+  if (!JOHOE_FORWARD_ENABLED || !JOHOE_FORWARD_URL || johoeForwardTimer) return;
+
+  processJohoeForwardOutbox().catch((error) => {
+    console.warn(`[johoe] Initial forward loop failed: ${error.message}`);
+  });
+
+  johoeForwardTimer = setInterval(() => {
+    processJohoeForwardOutbox().catch((error) => {
+      console.warn(`[johoe] Forward loop failed: ${error.message}`);
+    });
+  }, JOHOE_FORWARD_INTERVAL_MS);
+}
+
+// ═══════════════════════════════════════════════
 //  1. INVESTING.COM — FX currency crosses
 // ═══════════════════════════════════════════════
 const INVESTING_URL = 'https://www.investing.com/currencies/single-currency-crosses?currency=usd';
@@ -886,6 +1571,8 @@ async function warmUpFromDisk() {
     'companiesmarketcap-gold',
     MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY,
     MEMPOOL_KNOTS_CACHE_KEY,
+    JOHOE_CACHE_KEY,
+    JOHOE_HISTORY_CACHE_KEY,
     FRED_CACHE_KEY,
   ];
   for (const key of persistedKeys) {
@@ -898,6 +1585,9 @@ async function warmUpFromDisk() {
       }
       if (key === MEMPOOL_KNOTS_CACHE_KEY) {
         mempoolKnotsLatestData = entry.data;
+      }
+      if (key === JOHOE_CACHE_KEY) {
+        johoeLastSuccessfulSyncAt = Date.parse(entry.scrapedAt) || johoeLastSuccessfulSyncAt;
       }
     }
   }
@@ -1032,6 +1722,79 @@ function getRefreshTokenFromRequest(req) {
   }
 
   return (req.get('x-refresh-token') || '').trim();
+}
+
+function getJohoeLatestEntry() {
+  return cached(JOHOE_CACHE_KEY);
+}
+
+function buildJohoeMeta(entry) {
+  return {
+    cachedAt: entry?.updatedAt || null,
+    scraper: 'satoshi-scraper',
+    transport: johoeDatabaseReady ? 'postgres-http-poll' : 'disk-http-poll',
+    pollIntervalMs: JOHOE_POLL_INTERVAL_MS,
+    stale: isJohoeEntryStale(entry),
+    ageMs: getJohoeEntryAgeMs(entry),
+    lastError: johoeLastError,
+    lastSuccessfulSyncAt: johoeLastSuccessfulSyncAt ? new Date(johoeLastSuccessfulSyncAt).toISOString() : null,
+  };
+}
+
+function buildJohoeLatestResponse(entry, metric = null) {
+  const point = entry.data;
+  const payload = {
+    source: 'johoe',
+    provider: 'api.zatobox.io',
+    network: JOHOE_NETWORK,
+    timestamp: point.timestamp,
+    date: point.date,
+    latest: {
+      count: point.countTotal,
+      weight: point.weightTotal,
+      fee: point.feeTotal,
+    },
+    _meta: buildJohoeMeta(entry),
+  };
+
+  if (!metric) {
+    return {
+      ...payload,
+      countBuckets: point.countBuckets,
+      weightBuckets: point.weightBuckets,
+      feeBuckets: point.feeBuckets,
+    };
+  }
+
+  const metricConfig = {
+    count: {
+      totalField: 'countTotal',
+      bucketsField: 'countBuckets',
+      unit: 'tx',
+      name: 'Count',
+    },
+    weight: {
+      totalField: 'weightTotal',
+      bucketsField: 'weightBuckets',
+      unit: 'vbytes',
+      name: 'Weight',
+    },
+    fee: {
+      totalField: 'feeTotal',
+      bucketsField: 'feeBuckets',
+      unit: 'sats',
+      name: 'Fee',
+    },
+  }[metric];
+
+  return {
+    ...payload,
+    metric,
+    metricName: metricConfig.name,
+    unit: metricConfig.unit,
+    value: point[metricConfig.totalField],
+    buckets: point[metricConfig.bucketsField],
+  };
 }
 
 // 1. Investing.com currencies
@@ -1192,6 +1955,81 @@ app.get('/api/v1/init-data', (_req, res) => {
   res.json(entry.data.data);
 });
 
+// 13. Johoe BTC queue latest snapshot (count / weight / fee)
+app.get('/api/scrape/johoe-btc-queue/latest', (_req, res) => {
+  setPublicCacheHeaders(res, ENDPOINT_CACHE_CONTROL[JOHOE_CACHE_KEY]);
+  const entry = getJohoeLatestEntry();
+  if (!entry?.data) {
+    res.status(503).json({ ok: false, error: johoeLastError || 'johoe data not yet available' });
+    return;
+  }
+
+  res.json(buildJohoeLatestResponse(entry));
+});
+
+app.get('/api/scrape/johoe-btc-queue/latest/:metric(count|weight|fee)', (req, res) => {
+  setPublicCacheHeaders(res, ENDPOINT_CACHE_CONTROL[JOHOE_CACHE_KEY]);
+  const entry = getJohoeLatestEntry();
+  if (!entry?.data) {
+    res.status(503).json({ ok: false, error: johoeLastError || 'johoe data not yet available' });
+    return;
+  }
+
+  res.json(buildJohoeLatestResponse(entry, req.params.metric));
+});
+
+app.get('/api/scrape/johoe-btc-queue/history', async (req, res) => {
+  setPublicCacheHeaders(res, ENDPOINT_CACHE_CONTROL[JOHOE_HISTORY_CACHE_KEY]);
+
+  const from = Number(req.query.from);
+  const to = Number(req.query.to);
+  const includeBuckets = parseBooleanEnv(req.query.includeBuckets, false);
+  const requestedLimit = Number(req.query.limit);
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.max(1, Math.min(requestedLimit, 5000))
+    : JOHOE_HISTORY_LIMIT_DEFAULT;
+
+  try {
+    const points = await readJohoeHistoryFromDb({
+      from: Number.isFinite(from) ? from : null,
+      to: Number.isFinite(to) ? to : null,
+      limit,
+    });
+
+    if (!points.length) {
+      res.status(503).json({ ok: false, error: johoeLastError || 'johoe history not yet available' });
+      return;
+    }
+
+    const historyEntry = cached(JOHOE_HISTORY_CACHE_KEY);
+    res.json({
+      source: 'johoe',
+      provider: 'api.zatobox.io',
+      network: JOHOE_NETWORK,
+      range: {
+        from: points[0].timestamp,
+        to: points[points.length - 1].timestamp,
+        limit,
+      },
+      points: points.map((point) => (
+        includeBuckets
+          ? point
+          : {
+              timestamp: point.timestamp,
+              date: point.date,
+              count: point.countTotal,
+              weight: point.weightTotal,
+              fee: point.feeTotal,
+            }
+      )),
+      _meta: buildJohoeMeta(historyEntry),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
 // Manual refresh trigger
 app.get('/api/scrape/refresh', async (req, res) => {
   if (!SCRAPE_REFRESH_TOKEN) {
@@ -1205,7 +2043,7 @@ app.get('/api/scrape/refresh', async (req, res) => {
   }
 
   try {
-    await scrapeAll();
+    await Promise.all([scrapeAll(), pollJohoeQueue()]);
     res.json({ status: 'refreshed', timestamp: new Date().toISOString() });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1264,6 +2102,11 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log('     GET /api/scrape/mempool-space-unconfirmed-transactions');
   console.log('     GET /api/scrape/mempool-knots-init-data-json');
   console.log('     GET /api/scrape/mempool-knots-memory-usage');
+  console.log('     GET /api/scrape/johoe-btc-queue/latest');
+  console.log('     GET /api/scrape/johoe-btc-queue/latest/count');
+  console.log('     GET /api/scrape/johoe-btc-queue/latest/weight');
+  console.log('     GET /api/scrape/johoe-btc-queue/latest/fee');
+  console.log('     GET /api/scrape/johoe-btc-queue/history');
   console.log('     GET /api/public/mempool/node');
   console.log('     GET /api/v1/init-data');
   console.log('     GET /api/scrape/refresh');
@@ -1278,14 +2121,30 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log(`     mempool-space-unconfirmed-transactions: every ${MEMPOOL_SPACE_MEMPOOL_POLL_INTERVAL_MS}ms via HTTP`);
   console.log(`     mempool-knots-init-data-json: snapshot json every ${MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS}ms via local HTTP`);
   console.log(`     mempool-knots-memory-usage: relay cached json snapshot`);
+  console.log(`     johoe-btc-queue: every ${JOHOE_POLL_INTERVAL_MS}ms via HTTP JSONP`);
   console.log('\n   Loading cached data from disk...\n');
 
   await ensureCacheDir();
   await warmUpFromDisk();
+  await initJohoeDatabase().catch((error) => {
+    johoeLastError = error instanceof Error ? error.message : String(error);
+    console.error(`[johoe] Database init failed: ${johoeLastError}`);
+  });
+  if (johoeDatabaseReady) {
+    await refreshJohoeCacheFromDb().catch((error) => {
+      johoeLastError = error instanceof Error ? error.message : String(error);
+      console.error(`[johoe] Failed to warm cache from database: ${johoeLastError}`);
+    });
+  }
+  if (JOHOE_FORWARD_ENABLED && !JOHOE_FORWARD_URL) {
+    console.warn('[johoe] JOHOE_FORWARD_ENABLED=true but JOHOE_FORWARD_URL is missing; forwarding stays disabled');
+  }
   startMempoolSpaceStream();
   startMempoolSpaceStaleWatcher();
   startMempoolSpaceMempoolPollLoop();
   startMempoolKnotsSnapshotLoop();
+  startJohoePollingLoop();
+  startJohoeForwardLoop();
   console.log('\n   Running initial scrape...\n');
 
   scrapeAll()

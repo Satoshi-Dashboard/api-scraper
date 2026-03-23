@@ -1,0 +1,15 @@
+meta {
+  name: Johoe BTC Queue History
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/api/scrape/johoe-btc-queue/history?limit=60&includeBuckets=false
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}

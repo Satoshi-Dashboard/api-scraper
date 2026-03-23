@@ -1,6 +1,6 @@
 # SCRAPER_RULES.md — Satoshi Dashboard
 > Tabla canónica de decisión para scrapers, TTL de backend, CDN y polling de frontend.
-> Actualizado: 2026-03-07
+> Actualizado: 2026-03-23
 
 ---
 
@@ -10,6 +10,7 @@
 |--------|------|----------------|-------------|----------------------|-----------|-----------------|---------|
 | Binance BTCUSDT tick | 1 | < 1s | — (WebSocket) | 5s | 15s | 30s | `~30s` |
 | Mempool.space overview | 2 | ~10s | — (directo) | 5s | 20s | 30s | `~30s` |
+| Johoe mempool queue (count/fee/weight) | 2 | ~60s | loop `60000ms` | 60s | 180s | 60s | `~1m` |
 | Investing.com FX | 2 | ~15–30s | `0 * * * * *` (60s) | 30s | 60s | 30s | `~30s` |
 | CoinGecko stablecoins | 3 | ~60s | — (directo) | 120s | 240s | 2min | `↻ 2min` |
 | Newhedge global assets | 3 | ~1h | `0 * * * *` (1h) | 3 600s | 7 200s | 1h | `update: 1h` |
@@ -30,7 +31,7 @@ Datos de alta frecuencia en tiempo real. Requieren WebSocket o polling muy agres
 
 ### Tier 2 — `30s – 5min`
 Datos cuasi-real-time. HTTP polling agresivo válido.
-- **Ejemplos:** Mempool overview, FX investing.com
+- **Ejemplos:** Mempool overview, Johoe queue, FX investing.com
 - **Regla:** Scraper ≤ 60s. Backend TTL = intervalo scraper. Frontend poll ≥ TTL backend.
 
 ### Tier 3 — `5min – 1h`
@@ -154,3 +155,13 @@ Al crear un nuevo endpoint, seguir estos pasos en orden:
 ---
 
 *Satoshi Dashboard · Auditoría de alineación de relojes · 2026-03-07*
+
+## Registro Historico de Automejoras y Lecciones Aprendidas
+
+- **Fecha de la Actualizacion:** `2026-03-23`
+- **Archivo(s) Afectado(s):** `SCRAPER_RULES.md`, `server.js`, `docker-compose.yml`, `.env.example`, `.env`
+- **Tipo de Evento/Contexto:** Incorporacion de fuente mempool Johoe con persistencia historica para ZatoBox
+- **Descripcion del Evento Original:** El proyecto no tenia una fuente historica propia para `count`, `fee` y `weight` del mempool, y dependia de consultar Johoe externamente cada vez sin almacenamiento canonico minuto a minuto.
+- **Accion Realizada/Correccion:** Se agrego la familia Johoe como fuente Tier 2 con polling cada 60s, TTL honestos y persistencia pensada para operar dentro del stack Docker/Portainer o sobre SQL gestionado externo.
+- **Nueva/Modificada Regla o Directriz:** Las fuentes historicas cuasi realtime con formato estructurado tipo JSONP pueden integrarse server-side con polling de 60s, cache publica de 60s y almacenamiento SQL durable para evitar dependencia directa del frontend sobre el upstream externo.
+- **Justificacion:** Permite que ZatoBox consuma datos minuto a minuto desde su propia infraestructura con menor fragilidad operativa y mejor control del historico.

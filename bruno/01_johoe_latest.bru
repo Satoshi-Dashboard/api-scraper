@@ -1,0 +1,15 @@
+meta {
+  name: Johoe BTC Queue Latest
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/scrape/johoe-btc-queue/latest
+  body: none
+  auth: none
+}
+
+headers {
+  Accept: application/json
+}

@@ -33,6 +33,9 @@ This note bridges the canonical scraper policy into the local agent vault.
 9. Compatibility endpoints that relay cached snapshots should reuse the same cache-header policy as their canonical source endpoint whenever the payload is identical.
 10. Public response payloads should not expose private upstream base URLs, internal hostnames, or administrative secrets when those fields are not required for clients to render the data.
 11. Manual or administrative endpoints must be disabled by default or protected with a server-side secret that never lives in the public repo.
+12. JSONP or JavaScript data feeds must be parsed as inert data with strict wrapper validation and `JSON.parse`; never execute upstream payloads with `eval`, `Function`, or equivalent.
+13. If minute-level canonical history must survive host loss or unstable local Docker state, prefer managed external Postgres over a local stateful database container; keep on-disk cache only as warm-up support.
+14. Provider-supplied Postgres connection URIs may contain raw or bracketed passwords copied from dashboards; parse them safely on the backend instead of assuming strict URL encoding.
 
 ## Related Notes
 
@@ -64,3 +67,27 @@ This note bridges the canonical scraper policy into the local agent vault.
 - **Accion Realizada/Correccion:** Se reemplazaron defaults publicos por placeholders, se movio la configuracion real a variables de entorno, se ocultaron referencias al upstream privado en respuestas JSON y se protegió el refresh con token deshabilitado por defecto.
 - **Nueva/Modificada Regla o Directriz:** Los viewers publicos pueden seguir consumiendo endpoints de lectura, pero secretos operativos, upstreams privados y controles administrativos deben resolverse solo desde el entorno del servidor.
 - **Justificacion:** Permite mantener el codigo abierto sin filtrar infraestructura sensible ni habilitar controles administrativos a terceros.
+
+- **Fecha de la Actualizacion:** `2026-03-23`
+- **Archivo(s) Afectado(s):** `.claude/SCRAPER_OPERATING_RULES.md`, `SCRAPER_RULES.md`, `server.js`, `docker-compose.yml`, `.env.example`, `.env`
+- **Tipo de Evento/Contexto:** Nueva integracion de fuente Johoe con JSONP y persistencia SQL
+- **Descripcion del Evento Original:** La integracion de Johoe para mempool historico minuto a minuto exigio consumir un feed estructurado en JSONP/JS y no existia una regla local explicita para tratar ese formato como datos no ejecutables.
+- **Accion Realizada/Correccion:** Se anadio una regla explicita para feeds JSONP/JS, se implemento parsing estricto sin ejecucion de codigo y se monto persistencia SQL/Portainer para desacoplar ZatoBox del upstream.
+- **Nueva/Modificada Regla o Directriz:** Los feeds JSONP/JS se aceptan solo con validacion estricta del wrapper y parseo inerte; ademas, las fuentes historicas cuasi realtime deben persistirse fuera del proceso en almacenamiento durable cuando alimentan endpoints propios del stack.
+- **Justificacion:** Reduce riesgo de seguridad, evita fragilidad del frontend frente al upstream y deja trazabilidad operativa para fuentes sin API JSON formal.
+
+- **Fecha de la Actualizacion:** `2026-03-23`
+- **Archivo(s) Afectado(s):** `.claude/SCRAPER_OPERATING_RULES.md`, `docker-compose.yml`, `.env.example`, `.env`
+- **Tipo de Evento/Contexto:** Ajuste de despliegue para usar Supabase en lugar de Postgres local
+- **Descripcion del Evento Original:** El owner reporto cortes de luz y fallos del host Docker, lo que hacia riesgoso guardar el historico Johoe en un contenedor Postgres local dentro del mismo servidor.
+- **Accion Realizada/Correccion:** Se elimino el servicio Postgres del stack, se mantuvo la compatibilidad con `pg` y se reorientaron las variables de entorno para apuntar a Supabase con SSL.
+- **Nueva/Modificada Regla o Directriz:** Para historicos minuto a minuto que deben sobrevivir perdida del host, se permite y prioriza Postgres gestionado externo sobre base stateful local en Docker.
+- **Justificacion:** Mejora resiliencia operativa sin cambiar el contrato API ni la logica de ingestion.
+
+- **Fecha de la Actualizacion:** `2026-03-23`
+- **Archivo(s) Afectado(s):** `.claude/SCRAPER_OPERATING_RULES.md`, `server.js`, `.env.example`, `.env`
+- **Tipo de Evento/Contexto:** Endurecimiento de parsing para URIs directas de Supabase
+- **Descripcion del Evento Original:** La URI de conexion directa copiada desde Supabase podia incluir password con simbolos y formato entre corchetes, lo que rompe parsers estrictos basados solo en `new URL()`.
+- **Accion Realizada/Correccion:** Se agrego parsing tolerante para `DATABASE_URL` y se documentaron ejemplos de URI directa compatibles con el scraper.
+- **Nueva/Modificada Regla o Directriz:** Las credenciales remotas copiadas desde dashboards de proveedores deben aceptarse de forma segura aunque vengan en formato raw/bracketed, sin ejecutar ni reinterpretar contenido fuera de un parser controlado.
+- **Justificacion:** Reduce friccion operativa al configurar proveedores gestionados y evita fallos silenciosos por encoding incompleto de passwords.
