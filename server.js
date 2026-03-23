@@ -816,7 +816,8 @@ function parseJohoeJsonp(text) {
     throw new Error('Unexpected Johoe response format');
   }
 
-  const parsed = JSON.parse(match[1]);
+  const normalizedPayload = match[1].replace(/,\s*]$/, ']');
+  const parsed = JSON.parse(normalizedPayload);
   if (!Array.isArray(parsed)) {
     throw new Error('Johoe payload is not an array');
   }
