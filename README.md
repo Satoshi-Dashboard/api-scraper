@@ -1,30 +1,41 @@
-# Satoshi Dashboard Scraper
+# Satoshi Scraper
 
-Este es un microservicio autónomo en Node.js que sirve como recolector de datos (scraper) para el Satoshi Dashboard.
+Satoshi Scraper is a self-hosted Node.js microservice that collects, normalizes, caches, and relays data for Satoshi Dashboard.
 
-## ¿Por qué existe este servicio?
-Satoshi Dashboard necesita extraer datos de sitios web que bloquean las IPs de Vercel y otros datacenters (como `investing.com` o `bitinfocharts.com`). Al alojar este servicio en tu propia red o VPS (UmbrelOS, Portainer, etc.), utilizas IPs que no están bloqueadas, resolviendo así los errores 502 de la aplicación principal.
+It is designed for deployments on your own VPS, homelab, UmbrelOS, Docker host, or Portainer stack so you can avoid exposing upstream services, secrets, and private infrastructure directly to the public internet.
 
-## APIs Soportadas
+## Why this service exists
 
-| Endpoint | Descripción | Datos que muestra | Frecuencia de actualización |
-|----------|-------------|-------------------|----------------------------|
-| `/api/scrape/investing-currencies` | Investing.com | Tipos de cambio de divisas USD (EUR/USD, GBP/USD, etc.) | Cada 60 segundos |
-| `/api/scrape/bitinfocharts-richlist` | BitInfoCharts | Top 100 direcciones más ricas de Bitcoin y distribución | Diario (02:00 UTC) |
-| `/api/scrape/bitnodes-nodes` | BitNodes.io | Número de nodos Bitcoin y distribución por ASN | 2 veces al día (06:05 y 18:05 UTC) |
-| `/api/scrape/newhedge-global-assets` | NewHedge.io | Valores de activos globales relacionados con Bitcoin | Cada hora |
-| `/api/scrape/companiesmarketcap-gold` | CompaniesMarketCap | `GOLD`, market cap, precio y variación diaria del oro | Cada 15 minutos |
-| `/api/scrape/mempool-space-memory-usage` | mempool.space | Uso de memoria del mempool en tiempo real desde `stats.mempoolInfo.usage` | Tiempo real (WebSocket) |
-| `/api/scrape/mempool-knots-init-data-json` | Mempool Knots local | Snapshot JSON bruto de `/api/v1/init-data` | Cada 1 segundo |
-| `/api/scrape/mempool-knots-memory-usage` | Mempool Knots relay | JSON procesado desde el snapshot de Knots listo para la otra app | Cada 1 segundo |
-| `/api/scrape/johoe-btc-queue/latest` | Johoe queue | Último snapshot BTC con `count`, `weight` y `fee` | Cada 60 segundos |
-| `/api/scrape/johoe-btc-queue/history?range=24h` | Johoe queue | Ventana rolling de 24h en resolución ~1 minuto | Cada 60 segundos |
-| `/api/scrape/johoe-btc-queue/history?range=30d` | Johoe queue | Ventana rolling de 30 días en resolución ~30 minutos | Cada 15 minutos |
-| `/api/scrape/johoe-btc-queue/history?range=all` | Johoe queue | Histórico persistente diario desde `all.js` | Cada 6 horas |
-| `/api/public/mempool/node` | Compatibilidad Mempool API | Expone el snapshot raw de Knots desde esta API para evitar acceso directo a knotapi | Cada 1 segundo |
-| `/api/v1/init-data` | Compatibilidad Knots | Relay del payload raw de init-data de Knots servido por `api.zatobox.io` | Cada 1 segundo |
+Some upstream websites and APIs block traffic from Vercel or common datacenter IP ranges. By running this scraper on infrastructure you control, the dashboard can consume pre-scraped JSON from your own endpoint instead of connecting directly to fragile or rate-limited sources.
 
-### Endpoints disponibles
+This also gives you better control over:
+
+- origin shielding
+- credential isolation
+- cache persistence
+- transport security
+- public endpoint exposure
+
+## Supported API routes
+
+| Endpoint | Source | Returned data | Refresh cadence |
+|----------|--------|---------------|-----------------|
+| `/api/scrape/investing-currencies` | Investing.com | USD FX cross rates (EUR/USD, GBP/USD, etc.) | Every 60 seconds |
+| `/api/scrape/bitinfocharts-richlist` | BitInfoCharts | Top 100 richest Bitcoin addresses and distribution data | Daily at 02:00 UTC |
+| `/api/scrape/bitnodes-nodes` | BitNodes.io | Bitcoin node count and ASN distribution | Twice daily at 06:05 and 18:05 UTC |
+| `/api/scrape/newhedge-global-assets` | NewHedge.io | Global asset values related to Bitcoin comparisons | Hourly |
+| `/api/scrape/companiesmarketcap-gold` | CompaniesMarketCap | `GOLD`, market cap, gold price, and daily change | Every 15 minutes |
+| `/api/scrape/mempool-space-memory-usage` | mempool.space | Real-time mempool memory usage from `stats.mempoolInfo.usage` | Real time via WebSocket |
+| `/api/scrape/mempool-knots-init-data-json` | Local Mempool Knots | Raw JSON snapshot of `/api/v1/init-data` | Every 1 second |
+| `/api/scrape/mempool-knots-memory-usage` | Mempool Knots relay | Processed Knots memory payload for downstream apps | Every 1 second |
+| `/api/scrape/johoe-btc-queue/latest` | Johoe queue | Latest BTC queue snapshot with `count`, `weight`, and `fee` | Every 60 seconds |
+| `/api/scrape/johoe-btc-queue/history?range=24h` | Johoe queue | Rolling 24h window at roughly 1-minute resolution | Every 60 seconds |
+| `/api/scrape/johoe-btc-queue/history?range=30d` | Johoe queue | Rolling 30-day window at roughly 30-minute resolution | Every 15 minutes |
+| `/api/scrape/johoe-btc-queue/history?range=all` | Johoe queue | Durable daily history from `all.js` | Every 6 hours |
+| `/api/public/mempool/node` | Compatibility route | Public relay for the raw Knots snapshot | Every 1 second |
+| `/api/v1/init-data` | Compatibility route | Raw Knots `init-data` relay served by this API | Every 1 second |
+
+### Available endpoints
 
 - `GET /api/scrape/investing-currencies`
 - `GET /api/scrape/bitinfocharts-richlist`
@@ -44,102 +55,142 @@ Satoshi Dashboard necesita extraer datos de sitios web que bloquean las IPs de V
 - `GET /health`
 - `GET /readyz`
 
-## Operacion y tiempo de primera respuesta
+## Runtime behavior and warm-up
 
-- El scraper ahora reutiliza snapshots persistidos en disco para `investing-currencies`, `bitinfocharts-richlist`, `bitnodes-nodes`, `newhedge-global-assets` y `companiesmarketcap-gold`.
-- Johoe usa Supabase como almacenamiento canónico y conserva además snapshots de arranque en `cache/` para warm-up rápido del contenedor.
-- El arranque inicial ejecuta los scrapes HTTP de forma paralela para reducir el tiempo hasta tener datos reales disponibles tras reinicios.
-- `GET /health` indica que el proceso esta vivo; `GET /readyz` indica que los caches minimos para el dashboard ya estan cargados.
-- Los endpoints servidos desde cache publican `Cache-Control` con `s-maxage` y `stale-while-revalidate` para que el dashboard y el edge reutilicen snapshots reales ya obtenidos.
+- The scraper restores persisted disk snapshots for `investing-currencies`, `bitinfocharts-richlist`, `bitnodes-nodes`, `newhedge-global-assets`, and `companiesmarketcap-gold`.
+- Johoe uses Supabase as the canonical store and also keeps startup snapshots in `cache/` for faster container warm-up.
+- Initial startup runs HTTP scrapes in parallel to reduce the time required before real data becomes available after restart.
+- `GET /health` only confirms that the process is alive.
+- `GET /readyz` confirms that the minimum dashboard cache set is loaded.
+- Cache-backed endpoints return `Cache-Control` headers with `s-maxage` and `stale-while-revalidate` so downstream consumers can reuse valid snapshots.
 
-## Arquitectura Johoe + Supabase
+## Johoe + Supabase architecture
 
-La integración de Johoe quedó separada en tres datasets para mantener estable el peso en Supabase Free y seguir entregando una API propia a ZatoBox:
+The Johoe integration is split into three datasets so the project remains efficient on Supabase Free while still exposing a stable API:
 
-| Tabla Supabase | Fuente Johoe | Persistencia | Resolución real | Propósito |
+| Supabase table | Johoe source | Persistence model | Actual resolution | Purpose |
 |---|---|---|---|---|
-| `public.johoe_queue_all_daily` | `all.js` | Crece en el tiempo | ~1 punto por día | Histórico largo persistente |
-| `public.johoe_queue_24h_rolling` | `24h.js` | Rolling, espejo exacto | ~1 minuto | Último día y `latest` |
-| `public.johoe_queue_30d_rolling` | `30d.js` | Rolling, espejo exacto | ~30 minutos | Últimos 30 días sin crecimiento infinito |
+| `public.johoe_queue_all_daily` | `all.js` | Grows over time | ~1 point per day | Long-term durable history |
+| `public.johoe_queue_24h_rolling` | `24h.js` | Rolling mirror | ~1 minute | Latest day and `latest` route |
+| `public.johoe_queue_30d_rolling` | `30d.js` | Rolling mirror | ~30 minutes | Current 30-day view without infinite growth |
 
-Detalles importantes:
+Important details:
 
-- El backend no resume `all.js`; Johoe ya entrega ese histórico en resolución diaria.
-- `24h.js` y `30d.js` se espejan como ventanas rolling: se hace `upsert` de los puntos actuales y se borran los que ya salieron de la ventana.
-- El histórico persistente lo aporta solo `all.js`, por eso el tamaño de la base queda estable y predecible en Supabase Free.
-- `latest` se sirve desde la tabla rolling de `24h`, porque es la de mayor resolución disponible.
-- `history?range=all` devuelve histórico diario; `history?range=24h` y `history?range=30d` devuelven las ventanas vivas actuales.
+- `all.js` is stored as delivered by Johoe and is not downsampled again.
+- `24h.js` and `30d.js` are mirrored as rolling windows: current points are upserted and expired points are deleted.
+- Only `all.js` provides durable long-term growth, which keeps database size predictable.
+- `latest` is served from the `24h` rolling table because it is the highest-resolution source.
+- `history?range=all` returns daily history, while `history?range=24h` and `history?range=30d` return live rolling windows.
 
-## Scripts utiles
+## Useful script
 
 - `npm run sync:johoe:supabase`
 
-Este script fuerza una resincronización manual de las tres tablas Johoe (`all`, `24h`, `30d`) directamente contra Supabase. Es útil para sembrar datos por primera vez, reparar una tabla rolling o validar que el proyecto remoto quedó bien migrado.
+This script forces a manual re-sync of all three Johoe datasets (`all`, `24h`, `30d`) directly into Supabase. It is useful for first-time seeding, repairing a rolling table, or validating a remote project after migration.
 
-## Despliegue en Portainer (Vía GitHub)
+## Security model
 
-Ya que este directorio contiene toda la configuración necesaria (`Dockerfile` y `docker-compose.yml`), puedes desplegarlo muy fácilmente en Portainer directamente desde este repositorio.
+This repository is intended to reduce public exposure of private infrastructure, upstream origins, and credentials.
 
-### Paso 1: Subir código a GitHub
-Sube el contenido de esta carpeta (`satoshi-scraper`) a tu propio repositorio de GitHub (puede ser privado o público).
+### Core recommendations
 
-### Paso 2: Configurar Stack en Portainer
-1. Abre tu interfaz de Portainer y ve a **Stacks**.
-2. Dale a **Add stack**.
-3. Ponle un nombre (ej. `satoshi-scraper`).
-4. Selecciona el método de despliegue **Repository**.
-5. Pon la URL del repositorio al que acabas de subir estos archivos.
-6. Si es privado, asegúrate de activar **Authentication** y proporcionar tu token de acceso (PAT) o credenciales de la cuenta.
-7. (Opcional) Activa **Enable automatic updates** (usando webhook) vía polling o trigger para que Portainer aplique el nuevo código si actualizas la branch.
-8. En **Compose path**, asegúrate de que ponga `docker-compose.yml`.
-9. Haz clic en **Deploy the stack**.
+- Do not expose upstream APIs directly from your frontend.
+- Keep `.env` private and never commit real secrets.
+- Use this service as the only public-facing relay for scraped data.
+- Restrict CORS with an explicit allowlist in `CORS_ALLOWED_ORIGINS`.
+- Use HTTPS only in production.
+- Place the service behind a reverse proxy or tunnel such as Cloudflare Tunnel.
+- Avoid publishing your Supabase credentials, upstream node URLs, or internal hostnames.
 
-Variables Johoe recomendadas para Portainer:
+### Built-in protections
 
-- `DATABASE_URL`: usa el `Transaction pooler` de Supabase
+- Express `x-powered-by` is disabled.
+- HTTP to HTTPS redirection is enforced when the request host matches `HTTPS_REDIRECT_HOST`.
+- HTTPS responses include `Strict-Transport-Security: max-age=31536000; includeSubDomains; preload`.
+- `GET /health` is intentionally minimal and returns only `{ "status": "ok" }`.
+- CORS uses an explicit allowlist and does not rely on `*`.
+- Sensitive refresh operations can be protected with `SCRAPE_REFRESH_TOKEN`.
+
+### Secret-handling guidance
+
+- Never commit `.env`; only commit `.env.example`.
+- If a real `.env` was ever exposed, rotate all affected credentials immediately.
+- Treat `DATABASE_URL`, `JOHOE_FORWARD_TOKEN`, `FRED_API_KEY`, and private upstream URLs as secrets.
+- Use long random values for `SCRAPE_REFRESH_TOKEN`.
+- Prefer secret managers, Portainer environment variables, or private deployment variables over hardcoded values.
+
+### Network exposure guidance
+
+If you do not want to expose your APIs publicly as-is, use one of these patterns:
+
+- expose only the routes your dashboard needs through a reverse proxy
+- restrict access by IP allowlist, access policy, or tunnel authentication
+- keep private upstream services on an internal network and let only this scraper reach them
+- avoid direct port forwarding from your router to the container when a tunnel or hardened reverse proxy is available
+- separate public relay routes from private admin or internal-only services
+
+## Portainer deployment via Git repository
+
+This directory already includes `Dockerfile` and `docker-compose.yml`, so you can deploy it directly from a Git repository in Portainer.
+
+### Step 1: Push the code to GitHub
+
+Push the contents of this folder (`satoshi-scraper`) to your own GitHub repository. It can be private or public, but private is recommended.
+
+### Step 2: Create the stack in Portainer
+
+1. Open Portainer and go to **Stacks**.
+2. Click **Add stack**.
+3. Choose a name such as `satoshi-scraper`.
+4. Select the **Repository** deployment method.
+5. Enter the repository URL.
+6. If the repository is private, enable **Authentication** and provide a PAT or repository credentials.
+7. Optionally enable automatic updates if you want Portainer to pull new changes.
+8. Set **Compose path** to `docker-compose.yml`.
+9. Click **Deploy the stack**.
+
+Recommended Johoe environment values for Portainer:
+
+- `DATABASE_URL`: use the Supabase Transaction Pooler
 - `JOHOE_24H_SYNC_INTERVAL_MS=60000`
 - `JOHOE_30D_SYNC_INTERVAL_MS=900000`
 - `JOHOE_ALL_SYNC_INTERVAL_MS=21600000`
 - `JOHOE_DEFAULT_RANGE=24h`
 - `JOHOE_QUERY_LIMIT_MAX=5000`
 
-### Paso 3: Exponer mediante un túnel
-Una vez desplegado, el servicio estará corriendo en el puerto `9119` (ej. `http://localhost:9119` o IP local `http://192.168.0.x:9119`).
+### Step 3: Publish safely through a tunnel or reverse proxy
 
-Crea un túnel (como Cloudflare Tunnel) que exponga dicha IP local y puerto al dominio externo `https://api.zatobox.io/` (tal como has configurado).
+After deployment, the service runs on port `9119`, for example `http://localhost:9119` or `http://192.168.0.x:9119`.
 
-Asegúrate de comprobar la viabilidad llamando a:
-`https://api.zatobox.io/health` (respuesta mínima esperada: `{ "status": "ok" }`).
+For safer exposure:
 
-Checks recomendados tras el deploy:
+- prefer a Cloudflare Tunnel, Tailscale funnel, or hardened reverse proxy
+- publish only HTTPS
+- apply origin restrictions and access controls where possible
+- do not expose private upstream services directly
+
+Example health check:
+
+- `https://api.your-domain.com/health`
+
+Expected minimal response:
+
+```json
+{ "status": "ok" }
+```
+
+Recommended post-deploy checks:
 
 - `GET /api/scrape/johoe-btc-queue/latest`
 - `GET /api/scrape/johoe-btc-queue/history?range=24h&limit=60`
 - `GET /api/scrape/johoe-btc-queue/history?range=30d&limit=120`
 - `GET /api/scrape/johoe-btc-queue/history?range=all&limit=365`
 
-¡Con esto, el Satoshi Dashboard leerá mágicamente los datos y todo volverá a funcionar!
+## Migration from `knotapi.zatobox.io`
 
-
-## Seguridad de credenciales
-
-- **Nunca** subas `.env` al repositorio; usa solo `.env.example` como plantilla.
-- Si alguna vez un `.env` real estuvo versionado/publicado, rota inmediatamente passwords/tokens/credenciales (RPC, API keys, etc.).
-
-## Seguridad de despliegue
-
-- El backend fuerza redirección HTTP→HTTPS (308) cuando el host coincide con `HTTPS_REDIRECT_HOST` (por defecto `api.zatobox.io`).
-- En tráfico HTTPS se envía `Strict-Transport-Security: max-age=31536000; includeSubDomains; preload`.
-- CORS usa allowlist explícita vía `CORS_ALLOWED_ORIGINS` (CSV), sin wildcard `*`.
-- `x-powered-by` de Express está deshabilitado.
-- `/health` está minimizado para exponer solo `{ "status": "ok" }`.
-
-
-### Migración desde `knotapi.zatobox.io`
-
-Si tu app aún consume datos de Knots desde `knotapi.zatobox.io`, puedes apuntarla a `api.zatobox.io` usando rutas compatibles:
+If your app still consumes Knots data from `knotapi.zatobox.io`, you can point it to this service using compatible routes:
 
 - `GET /api/public/mempool/node`
 - `GET /api/v1/init-data`
 
-Ambas rutas son relays del snapshot de Knots obtenido por este servicio, para centralizar seguridad y exposición pública en un solo host.
+Both routes relay the Knots snapshot through this service so you can centralize security controls and public exposure on a single host.
