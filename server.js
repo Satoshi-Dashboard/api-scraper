@@ -1164,7 +1164,7 @@ async function refreshAllJohoeCachesFromDb() {
   await refreshJohoeLatestCacheFromDb();
 }
 
-async function readJohoeHistoryFromDb(rangeKey, { from = null, to = null, limit = null } = {}) {
+async function readJohoeHistoryFromDb(rangeKey, { from = null, to = null, limit = null, includeBuckets = false } = {}) {
   const rangeConfig = getJohoeRangeConfig(rangeKey);
   const actualLimit = Math.max(1, Math.min(limit || rangeConfig.defaultLimit, JOHOE_QUERY_LIMIT_MAX));
 
@@ -1188,19 +1188,37 @@ async function readJohoeHistoryFromDb(rangeKey, { from = null, to = null, limit 
   values.push(actualLimit);
   const whereClause = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
+  const baseFields = 'snapshot_ts_unix, snapshot_ts, count_total, weight_total, fee_total';
+  const bucketFields = includeBuckets ? ', count_buckets, weight_buckets, fee_buckets' : '';
+  const fields = baseFields + bucketFields;
+
   const result = await johoeDbPool.query(`
-    SELECT snapshot_ts_unix, snapshot_ts, count_buckets, weight_buckets, fee_buckets, count_total, weight_total, fee_total
-    FROM (
-      SELECT snapshot_ts_unix, snapshot_ts, count_buckets, weight_buckets, fee_buckets, count_total, weight_total, fee_total
-      FROM ${rangeConfig.tableName}
-      ${whereClause}
-      ORDER BY snapshot_ts_unix DESC
-      LIMIT $${values.length}
-    ) AS recent
-    ORDER BY snapshot_ts_unix ASC
+    SELECT ${fields}
+    FROM ${rangeConfig.tableName}
+    ${whereClause}
+    ORDER BY snapshot_ts_unix DESC
+    LIMIT $${values.length}
   `, values);
 
-  return result.rows.map(mapJohoeRow);
+  const rows = result.rows.map(row => {
+    const point = {
+      timestamp: Number(row.snapshot_ts_unix),
+      date: row.snapshot_ts ? new Date(row.snapshot_ts).toISOString() : new Date(Number(row.snapshot_ts_unix) * 1000).toISOString(),
+      countTotal: Number(row.count_total),
+      weightTotal: Number(row.weight_total),
+      feeTotal: Number(row.fee_total),
+    };
+
+    if (includeBuckets) {
+      point.countBuckets = normalizeJohoeBuckets(row.count_buckets);
+      point.weightBuckets = normalizeJohoeBuckets(row.weight_buckets);
+      point.feeBuckets = normalizeJohoeBuckets(row.fee_buckets);
+    }
+
+    return point;
+  });
+
+  return rows.reverse();
 }
 
 async function getExistingJohoeTimestamps(client, tableName, timestamps) {
@@ -2140,18 +2158,37 @@ app.get('/api/scrape/johoe-btc-queue/history', async (req, res) => {
     : rangeConfig.defaultLimit;
 
   try {
-    const points = await readJohoeHistoryFromDb(rangeConfig.key, {
-      from: Number.isFinite(from) ? from : null,
-      to: Number.isFinite(to) ? to : null,
-      limit,
-    });
+    let points;
+    let useCache = false;
+    const cachedEntry = cached(rangeConfig.historyCacheKey);
+
+    if (cachedEntry?.data?.points?.length) {
+      useCache = true;
+      let cachedPoints = cachedEntry.data.points;
+
+      if (Number.isFinite(from) || Number.isFinite(to)) {
+        cachedPoints = cachedPoints.filter(p =>
+          (!Number.isFinite(from) || p.timestamp >= from) &&
+          (!Number.isFinite(to) || p.timestamp <= to)
+        );
+      }
+
+      points = cachedPoints.slice(-limit);
+    } else {
+      points = await readJohoeHistoryFromDb(rangeConfig.key, {
+        from: Number.isFinite(from) ? from : null,
+        to: Number.isFinite(to) ? to : null,
+        limit,
+        includeBuckets,
+      });
+    }
 
     if (!points.length) {
       res.status(503).json({ ok: false, error: johoeLastError || 'johoe history not yet available' });
       return;
-      }
+    }
 
-    const historyEntry = cached(rangeConfig.historyCacheKey);
+    const historyEntry = useCache ? cachedEntry : cached(rangeConfig.historyCacheKey);
     res.json({
       source: 'johoe',
       provider: 'api.zatobox.io',
@@ -2184,6 +2221,50 @@ app.get('/api/scrape/johoe-btc-queue/history', async (req, res) => {
     const message = error instanceof Error ? error.message : String(error);
     res.status(500).json({ ok: false, error: message });
   }
+});
+
+app.get('/api/scrape/johoe-btc-queue/chart/:range', (req, res) => {
+  const requestedRange = String(req.params.range || JOHOE_DEFAULT_RANGE).trim().toLowerCase();
+  const rangeConfig = getJohoeRangeConfig(requestedRange);
+  setPublicCacheHeaders(res, ENDPOINT_CACHE_CONTROL[rangeConfig.historyCacheKey]);
+
+  const requestedLimit = Number(req.query.limit);
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.max(1, Math.min(requestedLimit, JOHOE_QUERY_LIMIT_MAX))
+    : rangeConfig.defaultLimit;
+
+  const cachedEntry = cached(rangeConfig.historyCacheKey);
+  if (!cachedEntry?.data?.points?.length) {
+    res.status(503).json({ ok: false, error: johoeLastError || 'johoe data not yet available' });
+    return;
+  }
+
+  const points = cachedEntry.data.points.slice(-limit);
+  const timestamps = [];
+  const counts = [];
+  const weights = [];
+  const fees = [];
+
+  for (const point of points) {
+    timestamps.push(point.timestamp);
+    counts.push(point.countTotal);
+    weights.push(point.weightTotal);
+    fees.push(point.feeTotal);
+  }
+
+  res.json({
+    timestamps,
+    counts,
+    weights,
+    fees,
+    _meta: {
+      range: rangeConfig.key,
+      from: points[0]?.timestamp,
+      to: points[points.length - 1]?.timestamp,
+      count: points.length,
+      updatedAt: cachedEntry.updatedAt,
+    },
+  });
 });
 
 // Manual refresh trigger
