@@ -328,6 +328,24 @@ const JOHOE_RANGE_CONFIG = {
     latestSource: false,
   },
 };
+
+// Bucket definitions for Johoe BTC Queue (53 raw buckets mapped to 12 standard fee bands)
+// These represent sat/vB ranges used by Johoe's upstream data
+const JOHOE_BUCKET_DEFINITIONS = [
+  { key: 'fee_0_1', label: '0-1', longLabel: '0-1 sat/vB', minFee: 0, maxFee: 1 },
+  { key: 'fee_1_2', label: '1-2', longLabel: '1-2 sat/vB', minFee: 1, maxFee: 2 },
+  { key: 'fee_2_3', label: '2-3', longLabel: '2-3 sat/vB', minFee: 2, maxFee: 3 },
+  { key: 'fee_3_5', label: '3-5', longLabel: '3-5 sat/vB', minFee: 3, maxFee: 5 },
+  { key: 'fee_5_10', label: '5-10', longLabel: '5-10 sat/vB', minFee: 5, maxFee: 10 },
+  { key: 'fee_10_20', label: '10-20', longLabel: '10-20 sat/vB', minFee: 10, maxFee: 20 },
+  { key: 'fee_20_50', label: '20-50', longLabel: '20-50 sat/vB', minFee: 20, maxFee: 50 },
+  { key: 'fee_50_100', label: '50-100', longLabel: '50-100 sat/vB', minFee: 50, maxFee: 100 },
+  { key: 'fee_100_200', label: '100-200', longLabel: '100-200 sat/vB', minFee: 100, maxFee: 200 },
+  { key: 'fee_200_500', label: '200-500', longLabel: '200-500 sat/vB', minFee: 200, maxFee: 500 },
+  { key: 'fee_500_1000', label: '500-1000', longLabel: '500-1000 sat/vB', minFee: 500, maxFee: 1000 },
+  { key: 'fee_1000_plus', label: '1000+', longLabel: '1000+ sat/vB', minFee: 1000, maxFee: null },
+];
+
 const JOHOE_RANGE_KEYS = Object.keys(JOHOE_RANGE_CONFIG);
 const REQUESTED_JOHOE_DEFAULT_RANGE = (process.env.JOHOE_DEFAULT_RANGE || '24h').toLowerCase();
 const JOHOE_DEFAULT_RANGE = JOHOE_RANGE_CONFIG[REQUESTED_JOHOE_DEFAULT_RANGE]
@@ -2199,6 +2217,7 @@ app.get('/api/scrape/johoe-btc-queue/history', async (req, res) => {
         resolution: rangeConfig.resolution,
         rolling: rangeConfig.rolling,
       },
+      ...(includeBuckets ? { bands: JOHOE_BUCKET_DEFINITIONS } : {}),
       range: {
         from: points[0].timestamp,
         to: points[points.length - 1].timestamp,
@@ -2221,6 +2240,16 @@ app.get('/api/scrape/johoe-btc-queue/history', async (req, res) => {
     const message = error instanceof Error ? error.message : String(error);
     res.status(500).json({ ok: false, error: message });
   }
+});
+
+// Meta endpoint - returns bucket definitions
+app.get('/api/scrape/johoe-btc-queue/meta', (_req, res) => {
+  res.json({
+    source: 'johoe',
+    provider: 'api.zatobox.io',
+    network: JOHOE_NETWORK,
+    bands: JOHOE_BUCKET_DEFINITIONS,
+  });
 });
 
 app.get('/api/scrape/johoe-btc-queue/chart/:range', (req, res) => {
