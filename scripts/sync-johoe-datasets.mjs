@@ -220,9 +220,10 @@ async function main() {
   await loadEnv();
 
   const databaseUrl = process.env.DATABASE_URL || '';
+  const skipVerify = parseBoolean(process.env.JOHOE_DB_SSL_INSECURE_SKIP_VERIFY, false);
   const pool = new Pool({
     ...parseDatabaseUrl(databaseUrl),
-    ssl: parseBoolean(process.env.JOHOE_DB_SSL, true) ? { rejectUnauthorized: false } : false,
+    ssl: parseBoolean(process.env.JOHOE_DB_SSL, true) ? { rejectUnauthorized: !skipVerify } : false,
     max: 1,
     connectionTimeoutMillis: 10_000,
   });

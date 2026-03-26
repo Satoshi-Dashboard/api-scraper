@@ -172,6 +172,12 @@ function parseBooleanEnv(value, defaultValue = false) {
   return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
 }
 
+function parsePositiveIntEnv(value, defaultValue, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) return defaultValue;
+  return Math.max(min, Math.min(Math.trunc(numericValue), max));
+}
+
 function safeDecodeURIComponent(value) {
   try {
     return decodeURIComponent(value);
@@ -246,9 +252,11 @@ function parseDatabaseUrl(connectionString) {
 }
 
 function buildDatabasePoolConfig(connectionString) {
+  const useTls = JOHOE_DB_SSL;
+  const skipVerify = JOHOE_DB_SSL_INSECURE_SKIP_VERIFY;
   return {
     ...parseDatabaseUrl(connectionString),
-    ssl: JOHOE_DB_SSL ? { rejectUnauthorized: false } : false,
+    ssl: useTls ? { rejectUnauthorized: !skipVerify } : false,
   };
 }
 
@@ -276,6 +284,7 @@ const JOHOE_STALE_MS = Number(process.env.JOHOE_STALE_MS || 180_000);
 const JOHOE_QUERY_LIMIT_MAX = Number(process.env.JOHOE_QUERY_LIMIT_MAX || 5000);
 const JOHOE_DB_ENABLED = parseBooleanEnv(process.env.JOHOE_DB_ENABLED, true);
 const JOHOE_DB_SSL = parseBooleanEnv(process.env.JOHOE_DB_SSL, false);
+const JOHOE_DB_SSL_INSECURE_SKIP_VERIFY = parseBooleanEnv(process.env.JOHOE_DB_SSL_INSECURE_SKIP_VERIFY, false);
 const DATABASE_URL = process.env.DATABASE_URL || '';
 const JOHOE_RANGE_CONFIG = {
   '24h': {
@@ -316,6 +325,7 @@ const JOHOE_DEFAULT_RANGE = JOHOE_RANGE_CONFIG[REQUESTED_JOHOE_DEFAULT_RANGE]
   ? REQUESTED_JOHOE_DEFAULT_RANGE
   : '24h';
 const HTTPS_REDIRECT_HOST = (process.env.HTTPS_REDIRECT_HOST || 'api.example.com').toLowerCase();
+const TRUST_PROXY = process.env.TRUST_PROXY || 'loopback, linklocal, uniquelocal';
 const CORS_ALLOWED_ORIGINS = new Set(
   (process.env.CORS_ALLOWED_ORIGINS || 'https://example.com,https://www.example.com')
     .split(',')
@@ -323,6 +333,8 @@ const CORS_ALLOWED_ORIGINS = new Set(
     .filter(Boolean)
 );
 const SCRAPE_REFRESH_TOKEN = process.env.SCRAPE_REFRESH_TOKEN || '';
+const REFRESH_MIN_INTERVAL_MS = parsePositiveIntEnv(process.env.REFRESH_MIN_INTERVAL_MS, 60_000, { min: 1000, max: 86_400_000 });
+const FRED_MAX_LIMIT = parsePositiveIntEnv(process.env.FRED_MAX_LIMIT, 1000, { min: 1, max: 5000 });
 const STARTUP_REQUIRED_KEYS = [
   'investing-currencies',
   'bitinfocharts-richlist',
@@ -364,6 +376,7 @@ let mempoolKnotsLastPersistedSignature = null;
 let mempoolKnotsInitDataLastPersistedSignature = null;
 let johoeLastError = null;
 let johoeLastSuccessfulSyncAt = 0;
+let refreshLastTriggeredAt = 0;
 let johoeDbPool = null;
 let johoeDatabaseReady = false;
 const johoeSyncTimers = Object.create(null);
@@ -1600,7 +1613,7 @@ async function scrapeAll() {
 // ═══════════════════════════════════════════════
 const app = express();
 app.disable('x-powered-by');
-app.set('trust proxy', true);
+app.set('trust proxy', TRUST_PROXY);
 
 // Middleware: force HTTPS for public host + set HSTS on secure requests
 app.use((req, res, next) => {
@@ -1624,8 +1637,8 @@ app.use((req, res, next) => {
   if (origin && CORS_ALLOWED_ORIGINS.has(origin)) {
     res.set('Access-Control-Allow-Origin', origin);
     res.set('Vary', 'Origin');
-    res.set('Access-Control-Allow-Methods', 'GET,OPTIONS');
-    res.set('Access-Control-Allow-Headers', 'Content-Type');
+    res.set('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Refresh-Token');
   }
 
   if (req.method === 'OPTIONS') {
@@ -1803,8 +1816,22 @@ app.get('/api/fred/mspus', async (req, res) => {
   const apiKey = process.env.FRED_API_KEY || '';
   const { from, limit } = req.query;
 
+  if (from != null && !/^\d{4}-\d{2}-\d{2}$/.test(String(from))) {
+    res.status(400).json({ error: 'invalid from date; expected YYYY-MM-DD' });
+    return;
+  }
+
+  const requestedLimit = Number(limit);
+  if (limit != null && (!Number.isFinite(requestedLimit) || requestedLimit < 1)) {
+    res.status(400).json({ error: 'invalid limit; expected a positive integer' });
+    return;
+  }
+
+  const resolvedLimit = limit != null
+    ? Math.max(1, Math.min(Math.trunc(requestedLimit), FRED_MAX_LIMIT))
+    : FRED_MAX_LIMIT;
   const sortOrder = limit ? 'desc' : 'asc';
-  const limitValue = limit ? String(limit) : '1000';
+  const limitValue = String(resolvedLimit);
 
   const params = new URLSearchParams({
     series_id: 'MSPUS',
@@ -2097,8 +2124,7 @@ app.get('/api/scrape/johoe-btc-queue/chart/:range', (req, res) => {
   });
 });
 
-// Manual refresh trigger
-app.get('/api/scrape/refresh', async (req, res) => {
+async function handleManualRefresh(req, res) {
   if (!SCRAPE_REFRESH_TOKEN) {
     res.status(403).json({ error: 'manual refresh disabled' });
     return;
@@ -2109,12 +2135,28 @@ app.get('/api/scrape/refresh', async (req, res) => {
     return;
   }
 
+  const now = Date.now();
+  const retryAfterSeconds = Math.ceil(Math.max(0, REFRESH_MIN_INTERVAL_MS - (now - refreshLastTriggeredAt)) / 1000);
+  if (refreshLastTriggeredAt && now - refreshLastTriggeredAt < REFRESH_MIN_INTERVAL_MS) {
+    res.set('Retry-After', String(retryAfterSeconds));
+    res.status(429).json({ error: 'refresh rate limited', retryAfterSeconds });
+    return;
+  }
+
   try {
+    refreshLastTriggeredAt = now;
     await Promise.all([scrapeAll(), syncAllJohoeRanges()]);
     res.json({ status: 'refreshed', timestamp: new Date().toISOString() });
   } catch (e) {
+    refreshLastTriggeredAt = 0;
     res.status(500).json({ error: e.message });
   }
+}
+
+app.post('/api/scrape/refresh', handleManualRefresh);
+app.get('/api/scrape/refresh', (_req, res) => {
+  res.set('Allow', 'POST');
+  res.status(405).json({ error: 'use POST for manual refresh' });
 });
 
 // ═══════════════════════════════════════════════
@@ -2176,7 +2218,7 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log('     GET /api/scrape/johoe-btc-queue/history?range=24h');
   console.log('     GET /api/public/mempool/node');
   console.log('     GET /api/v1/init-data');
-  console.log('     GET /api/scrape/refresh');
+  console.log('     POST /api/scrape/refresh');
   console.log('\n   Cron schedules:');
   console.log('     investing-currencies  : every 60s');
   console.log('     bitinfocharts-richlist: daily at 02:00 UTC');
