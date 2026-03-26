@@ -271,22 +271,12 @@ const JOHOE_BASE_URL = (process.env.JOHOE_BASE_URL || 'https://johoe.jochen-hoen
 const JOHOE_NETWORK = process.env.JOHOE_NETWORK || 'btc';
 const JOHOE_LATEST_CACHE_KEY = 'johoe-btc-queue-latest';
 const JOHOE_HISTORY_24H_CACHE_KEY = 'johoe-btc-queue-history-24h';
-const JOHOE_HISTORY_30D_CACHE_KEY = 'johoe-btc-queue-history-30d';
-const JOHOE_HISTORY_ALL_CACHE_KEY = 'johoe-btc-queue-history-all';
 const JOHOE_24H_SYNC_INTERVAL_MS = Number(process.env.JOHOE_24H_SYNC_INTERVAL_MS || process.env.JOHOE_POLL_INTERVAL_MS || 60_000);
-const JOHOE_30D_SYNC_INTERVAL_MS = Number(process.env.JOHOE_30D_SYNC_INTERVAL_MS || 900_000);
-const JOHOE_ALL_SYNC_INTERVAL_MS = Number(process.env.JOHOE_ALL_SYNC_INTERVAL_MS || 21_600_000);
 const JOHOE_STALE_MS = Number(process.env.JOHOE_STALE_MS || 180_000);
 const JOHOE_QUERY_LIMIT_MAX = Number(process.env.JOHOE_QUERY_LIMIT_MAX || 5000);
 const JOHOE_DB_ENABLED = parseBooleanEnv(process.env.JOHOE_DB_ENABLED, true);
 const JOHOE_DB_SSL = parseBooleanEnv(process.env.JOHOE_DB_SSL, false);
 const DATABASE_URL = process.env.DATABASE_URL || '';
-const JOHOE_FORWARD_ENABLED = parseBooleanEnv(process.env.JOHOE_FORWARD_ENABLED, false);
-const JOHOE_FORWARD_URL = process.env.JOHOE_FORWARD_URL || '';
-const JOHOE_FORWARD_TOKEN = process.env.JOHOE_FORWARD_TOKEN || '';
-const JOHOE_FORWARD_BATCH_SIZE = Number(process.env.JOHOE_FORWARD_BATCH_SIZE || 10);
-const JOHOE_FORWARD_INTERVAL_MS = Number(process.env.JOHOE_FORWARD_INTERVAL_MS || 15_000);
-const JOHOE_FORWARD_TIMEOUT_MS = Number(process.env.JOHOE_FORWARD_TIMEOUT_MS || 10_000);
 const JOHOE_RANGE_CONFIG = {
   '24h': {
     key: '24h',
@@ -300,32 +290,6 @@ const JOHOE_RANGE_CONFIG = {
     resolution: 'minute',
     rolling: true,
     latestSource: true,
-  },
-  '30d': {
-    key: '30d',
-    label: '30d rolling',
-    tableName: 'johoe_queue_30d_rolling',
-    historyCacheKey: JOHOE_HISTORY_30D_CACHE_KEY,
-    sourcePath: '30d.js',
-    syncIntervalMs: JOHOE_30D_SYNC_INTERVAL_MS,
-    defaultLimit: 1440,
-    maxCachedPoints: 1440,
-    resolution: '30-minute',
-    rolling: true,
-    latestSource: false,
-  },
-  all: {
-    key: 'all',
-    label: 'all daily',
-    tableName: 'johoe_queue_all_daily',
-    historyCacheKey: JOHOE_HISTORY_ALL_CACHE_KEY,
-    sourcePath: 'all.js',
-    syncIntervalMs: JOHOE_ALL_SYNC_INTERVAL_MS,
-    defaultLimit: 3650,
-    maxCachedPoints: JOHOE_QUERY_LIMIT_MAX,
-    resolution: 'daily',
-    rolling: false,
-    latestSource: false,
   },
 };
 
@@ -378,10 +342,8 @@ const ENDPOINT_CACHE_CONTROL = {
   [MEMPOOL_SPACE_UNCONFIRMED_CACHE_KEY]: { sMaxAge: 5, swr: 20 },
   [MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY]: { sMaxAge: 1, swr: 3 },
   [MEMPOOL_KNOTS_CACHE_KEY]: { sMaxAge: 1, swr: 3 },
-  [JOHOE_LATEST_CACHE_KEY]: { sMaxAge: 60, swr: 180 },
-  [JOHOE_HISTORY_24H_CACHE_KEY]: { sMaxAge: 60, swr: 180 },
-  [JOHOE_HISTORY_30D_CACHE_KEY]: { sMaxAge: 900, swr: 1800 },
-  [JOHOE_HISTORY_ALL_CACHE_KEY]: { sMaxAge: 3600, swr: 21600 },
+  [JOHOE_LATEST_CACHE_KEY]: { sMaxAge: 30, swr: 60 },
+  [JOHOE_HISTORY_24H_CACHE_KEY]: { sMaxAge: 30, swr: 60 },
   [FRED_CACHE_KEY]: { sMaxAge: 86400, swr: 86400 }, // FRED updates quarterly, cache 24h
 };
 
@@ -410,8 +372,6 @@ const johoeRangeStatus = Object.fromEntries(JOHOE_RANGE_KEYS.map((key) => [key, 
   lastError: null,
   lastSuccessfulSyncAt: 0,
 }]));
-let johoeForwardTimer = null;
-let johoeForwardInFlight = false;
 
 // ─────────────────────────────────────────────
 //  Disk persistence helpers
@@ -923,24 +883,6 @@ function buildJohoeHistoryPayload(rangeKey, points) {
   };
 }
 
-function buildJohoeForwardPayload(point) {
-  return {
-    source: 'johoe',
-    provider: 'api.zatobox.io',
-    network: JOHOE_NETWORK,
-    timestamp: point.timestamp,
-    date: point.date,
-    countBuckets: point.countBuckets,
-    weightBuckets: point.weightBuckets,
-    feeBuckets: point.feeBuckets,
-    latest: {
-      count: point.countTotal,
-      weight: point.weightTotal,
-      fee: point.feeTotal,
-    },
-  };
-}
-
 function getJohoeEntryAgeMs(entry) {
   if (!entry?.updatedAt) return Number.POSITIVE_INFINITY;
   const updatedAtMs = Date.parse(entry.updatedAt);
@@ -1058,48 +1000,6 @@ async function ensureJohoeHistoryTable(tableName) {
   `);
 }
 
-async function ensureJohoeForwardOutbox() {
-  if (!JOHOE_FORWARD_ENABLED) return;
-
-  await johoeDbPool.query(`
-    CREATE TABLE IF NOT EXISTS johoe_forward_outbox (
-      snapshot_ts_unix BIGINT PRIMARY KEY,
-      source_table TEXT NOT NULL DEFAULT '${JOHOE_RANGE_CONFIG['24h'].tableName}',
-      payload JSONB NOT NULL,
-      attempts INTEGER NOT NULL DEFAULT 0,
-      last_attempt_at TIMESTAMPTZ,
-      last_error TEXT,
-      delivered_at TIMESTAMPTZ,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
-  await johoeDbPool.query(`ALTER TABLE johoe_forward_outbox ADD COLUMN IF NOT EXISTS source_table TEXT`);
-  await johoeDbPool.query(`
-    UPDATE johoe_forward_outbox
-    SET source_table = '${JOHOE_RANGE_CONFIG['24h'].tableName}'
-    WHERE source_table IS NULL OR source_table = ''
-  `);
-  await johoeDbPool.query(`ALTER TABLE johoe_forward_outbox ALTER COLUMN source_table SET NOT NULL`);
-  await johoeDbPool.query(`
-    CREATE INDEX IF NOT EXISTS idx_johoe_forward_outbox_pending
-      ON johoe_forward_outbox (snapshot_ts_unix)
-      WHERE delivered_at IS NULL
-  `);
-  await johoeDbPool.query(`ALTER TABLE johoe_forward_outbox ENABLE ROW LEVEL SECURITY`);
-  await johoeDbPool.query(`
-    DO $$
-    BEGIN
-      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
-        EXECUTE 'REVOKE ALL ON TABLE johoe_forward_outbox FROM anon';
-      END IF;
-      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-        EXECUTE 'REVOKE ALL ON TABLE johoe_forward_outbox FROM authenticated';
-      END IF;
-    END
-    $$;
-  `);
-}
-
 async function initJohoeDatabase() {
   if (!JOHOE_DB_ENABLED) return;
 
@@ -1115,7 +1015,6 @@ async function initJohoeDatabase() {
     await ensureJohoeHistoryTable(getJohoeRangeConfig(rangeKey).tableName);
   }
 
-  await ensureJohoeForwardOutbox();
   johoeDatabaseReady = true;
 }
 
@@ -1137,7 +1036,7 @@ async function getLatestJohoeTimestampFromDb(rangeKey) {
 async function refreshJohoeLatestCacheFromDb() {
   if (!johoeDatabaseReady) return;
 
-  for (const rangeKey of ['24h', '30d', 'all']) {
+  for (const rangeKey of JOHOE_RANGE_KEYS) {
     const rangeConfig = getJohoeRangeConfig(rangeKey);
     const result = await johoeDbPool.query(`
       SELECT snapshot_ts_unix, snapshot_ts, count_buckets, weight_buckets, fee_buckets, count_total, weight_total, fee_total
@@ -1299,21 +1198,9 @@ async function upsertJohoeTableBatch(client, tableName, points) {
 }
 
 async function queueJohoeForwardPayloads(client, rangeKey, points) {
-  const rangeConfig = getJohoeRangeConfig(rangeKey);
-  if (!JOHOE_FORWARD_ENABLED || !rangeConfig.latestSource || !points.length) return;
-
-  const values = [];
-  const placeholders = points.map((point) => {
-    const offset = values.length;
-    values.push(point.timestamp, rangeConfig.tableName, JSON.stringify(buildJohoeForwardPayload(point)));
-    return `($${offset + 1}, $${offset + 2}, $${offset + 3}::jsonb)`;
-  });
-
-  await client.query(`
-    INSERT INTO johoe_forward_outbox (snapshot_ts_unix, source_table, payload)
-    VALUES ${placeholders.join(', ')}
-    ON CONFLICT (snapshot_ts_unix) DO NOTHING
-  `, values);
+  void client;
+  void rangeKey;
+  void points;
 }
 
 async function storeJohoePoints(rangeKey, points) {
@@ -1398,76 +1285,6 @@ async function syncAllJohoeRanges() {
   await Promise.all(JOHOE_RANGE_KEYS.map((rangeKey) => syncJohoeRange(rangeKey)));
 }
 
-async function forwardJohoePayload(payload) {
-  if (!JOHOE_FORWARD_ENABLED || !JOHOE_FORWARD_URL) return;
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), JOHOE_FORWARD_TIMEOUT_MS);
-
-  try {
-    const res = await fetch(JOHOE_FORWARD_URL, {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(JOHOE_FORWARD_TOKEN ? { Authorization: `Bearer ${JOHOE_FORWARD_TOKEN}` } : {}),
-        'Idempotency-Key': `johoe-${payload.timestamp}`,
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!res.ok) {
-      throw new Error(`ZatoBox forward failed with HTTP ${res.status}`);
-    }
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function processJohoeForwardOutbox() {
-  if (!JOHOE_FORWARD_ENABLED || !JOHOE_FORWARD_URL || !johoeDatabaseReady || johoeForwardInFlight) return;
-  johoeForwardInFlight = true;
-
-  const client = await johoeDbPool.connect();
-  try {
-    const result = await client.query(`
-      SELECT snapshot_ts_unix, source_table, payload
-      FROM johoe_forward_outbox
-      WHERE delivered_at IS NULL
-      ORDER BY snapshot_ts_unix ASC
-      LIMIT $1
-    `, [JOHOE_FORWARD_BATCH_SIZE]);
-
-    for (const row of result.rows) {
-      const snapshotTsUnix = Number(row.snapshot_ts_unix);
-      try {
-        await forwardJohoePayload(row.payload);
-        await client.query(`
-          UPDATE johoe_forward_outbox
-          SET attempts = attempts + 1,
-              last_attempt_at = NOW(),
-              last_error = NULL,
-              delivered_at = NOW()
-          WHERE snapshot_ts_unix = $1
-        `, [snapshotTsUnix]);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        await client.query(`
-          UPDATE johoe_forward_outbox
-          SET attempts = attempts + 1,
-              last_attempt_at = NOW(),
-              last_error = $2
-          WHERE snapshot_ts_unix = $1
-        `, [snapshotTsUnix, message.slice(0, 1000)]);
-        console.warn(`[johoe] Forward failed for ${snapshotTsUnix}: ${message}`);
-      }
-    }
-  } finally {
-    client.release();
-    johoeForwardInFlight = false;
-  }
-}
-
 function startJohoePollingLoop(rangeKey) {
   const rangeConfig = getJohoeRangeConfig(rangeKey);
   if (johoeSyncTimers[rangeConfig.key]) return;
@@ -1487,20 +1304,6 @@ function startAllJohoePollingLoops() {
   for (const rangeKey of JOHOE_RANGE_KEYS) {
     startJohoePollingLoop(rangeKey);
   }
-}
-
-function startJohoeForwardLoop() {
-  if (!JOHOE_FORWARD_ENABLED || !JOHOE_FORWARD_URL || johoeForwardTimer) return;
-
-  processJohoeForwardOutbox().catch((error) => {
-    console.warn(`[johoe] Initial forward loop failed: ${error.message}`);
-  });
-
-  johoeForwardTimer = setInterval(() => {
-    processJohoeForwardOutbox().catch((error) => {
-      console.warn(`[johoe] Forward loop failed: ${error.message}`);
-    });
-  }, JOHOE_FORWARD_INTERVAL_MS);
 }
 
 // ═══════════════════════════════════════════════
@@ -1742,8 +1545,6 @@ async function warmUpFromDisk() {
     MEMPOOL_KNOTS_CACHE_KEY,
     JOHOE_LATEST_CACHE_KEY,
     JOHOE_HISTORY_24H_CACHE_KEY,
-    JOHOE_HISTORY_30D_CACHE_KEY,
-    JOHOE_HISTORY_ALL_CACHE_KEY,
     FRED_CACHE_KEY,
   ];
   for (const key of persistedKeys) {
@@ -2372,7 +2173,7 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log('     GET /api/scrape/johoe-btc-queue/latest/count');
   console.log('     GET /api/scrape/johoe-btc-queue/latest/weight');
   console.log('     GET /api/scrape/johoe-btc-queue/latest/fee');
-  console.log('     GET /api/scrape/johoe-btc-queue/history?range=24h|30d|all');
+  console.log('     GET /api/scrape/johoe-btc-queue/history?range=24h');
   console.log('     GET /api/public/mempool/node');
   console.log('     GET /api/v1/init-data');
   console.log('     GET /api/scrape/refresh');
@@ -2388,8 +2189,6 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log(`     mempool-knots-init-data-json: snapshot json every ${MEMPOOL_KNOTS_HTTP_POLL_INTERVAL_MS}ms via local HTTP`);
   console.log(`     mempool-knots-memory-usage: relay cached json snapshot`);
   console.log(`     johoe 24h rolling: every ${JOHOE_24H_SYNC_INTERVAL_MS}ms via 24h.js`);
-  console.log(`     johoe 30d rolling: every ${JOHOE_30D_SYNC_INTERVAL_MS}ms via 30d.js`);
-  console.log(`     johoe all daily  : every ${JOHOE_ALL_SYNC_INTERVAL_MS}ms via all.js`);
   console.log('\n   Loading cached data from disk...\n');
 
   await ensureCacheDir();
@@ -2404,15 +2203,11 @@ app.listen(PORT, '0.0.0.0', async () => {
       console.error(`[johoe] Failed to warm cache from database: ${johoeLastError}`);
     });
   }
-  if (JOHOE_FORWARD_ENABLED && !JOHOE_FORWARD_URL) {
-    console.warn('[johoe] JOHOE_FORWARD_ENABLED=true but JOHOE_FORWARD_URL is missing; forwarding stays disabled');
-  }
   startMempoolSpaceStream();
   startMempoolSpaceStaleWatcher();
   startMempoolSpaceMempoolPollLoop();
   startMempoolKnotsSnapshotLoop();
   startAllJohoePollingLoops();
-  startJohoeForwardLoop();
   console.log('\n   Running initial scrape...\n');
 
   scrapeAll()

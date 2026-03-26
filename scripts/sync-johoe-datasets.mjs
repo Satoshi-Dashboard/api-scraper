@@ -229,21 +229,9 @@ async function main() {
 
   const datasets = [
     {
-      key: 'all',
-      tableName: 'johoe_queue_all_daily',
-      url: 'https://johoe.jochen-hoenicke.de/queue/2/all.js',
-      rolling: false,
-    },
-    {
       key: '24h',
       tableName: 'johoe_queue_24h_rolling',
       url: 'https://johoe.jochen-hoenicke.de/queue/2/24h.js',
-      rolling: true,
-    },
-    {
-      key: '30d',
-      tableName: 'johoe_queue_30d_rolling',
-      url: 'https://johoe.jochen-hoenicke.de/queue/2/30d.js',
       rolling: true,
     },
   ];
@@ -262,11 +250,7 @@ async function main() {
     const counts = await pool.query(`
       SELECT table_name, count(*)::int AS rows, min(snapshot_ts) AS first_ts, max(snapshot_ts) AS last_ts
       FROM (
-        SELECT 'johoe_queue_all_daily'::text AS table_name, snapshot_ts FROM public.johoe_queue_all_daily
-        UNION ALL
         SELECT 'johoe_queue_24h_rolling'::text AS table_name, snapshot_ts FROM public.johoe_queue_24h_rolling
-        UNION ALL
-        SELECT 'johoe_queue_30d_rolling'::text AS table_name, snapshot_ts FROM public.johoe_queue_30d_rolling
       ) AS datasets
       GROUP BY 1
       ORDER BY 1

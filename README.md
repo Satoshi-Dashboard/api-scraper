@@ -30,8 +30,6 @@ This also gives you better control over:
 | `/api/scrape/mempool-knots-memory-usage` | Mempool Knots relay | Processed Knots memory payload for downstream apps | Every 1 second |
 | `/api/scrape/johoe-btc-queue/latest` | Johoe queue | Latest BTC queue snapshot with `count`, `weight`, and `fee` | Every 60 seconds |
 | `/api/scrape/johoe-btc-queue/history?range=24h` | Johoe queue | Rolling 24h window at roughly 1-minute resolution | Every 60 seconds |
-| `/api/scrape/johoe-btc-queue/history?range=30d` | Johoe queue | Rolling 30-day window at roughly 30-minute resolution | Every 15 minutes |
-| `/api/scrape/johoe-btc-queue/history?range=all` | Johoe queue | Durable daily history from `all.js` | Every 6 hours |
 | `/api/public/mempool/node` | Compatibility route | Public relay for the raw Knots snapshot | Every 1 second |
 | `/api/v1/init-data` | Compatibility route | Raw Knots `init-data` relay served by this API | Every 1 second |
 
@@ -49,7 +47,7 @@ This also gives you better control over:
 - `GET /api/scrape/johoe-btc-queue/latest/count`
 - `GET /api/scrape/johoe-btc-queue/latest/weight`
 - `GET /api/scrape/johoe-btc-queue/latest/fee`
-- `GET /api/scrape/johoe-btc-queue/history?range=24h|30d|all`
+- `GET /api/scrape/johoe-btc-queue/history?range=24h`
 - `GET /api/public/mempool/node`
 - `GET /api/v1/init-data`
 - `GET /health`
@@ -66,27 +64,23 @@ This also gives you better control over:
 
 ## Johoe + Supabase architecture
 
-The Johoe integration is split into three datasets so the project remains efficient on Supabase Free while still exposing a stable API:
+The Johoe integration now keeps a single real-time dataset in Supabase:
 
 | Supabase table | Johoe source | Persistence model | Actual resolution | Purpose |
 |---|---|---|---|---|
-| `public.johoe_queue_all_daily` | `all.js` | Grows over time | ~1 point per day | Long-term durable history |
-| `public.johoe_queue_24h_rolling` | `24h.js` | Rolling mirror | ~1 minute | Latest day and `latest` route |
-| `public.johoe_queue_30d_rolling` | `30d.js` | Rolling mirror | ~30 minutes | Current 30-day view without infinite growth |
+| `public.johoe_queue_24h_rolling` | `24h.js` | Rolling mirror | ~1 minute | Canonical real-time history and `latest` route |
 
 Important details:
 
-- `all.js` is stored as delivered by Johoe and is not downsampled again.
-- `24h.js` and `30d.js` are mirrored as rolling windows: current points are upserted and expired points are deleted.
-- Only `all.js` provides durable long-term growth, which keeps database size predictable.
-- `latest` is served from the `24h` rolling table because it is the highest-resolution source.
-- `history?range=all` returns daily history, while `history?range=24h` and `history?range=30d` return live rolling windows.
+- `24h.js` is mirrored as a rolling window: current points are upserted and expired points are deleted.
+- `latest` is served from `public.johoe_queue_24h_rolling`.
+- The service no longer relies on `30d`, `all`, or `johoe_forward_outbox` tables.
 
 ## Useful script
 
 - `npm run sync:johoe:supabase`
 
-This script forces a manual re-sync of all three Johoe datasets (`all`, `24h`, `30d`) directly into Supabase. It is useful for first-time seeding, repairing a rolling table, or validating a remote project after migration.
+This script forces a manual re-sync of the Johoe `24h` dataset directly into Supabase. It is useful for first-time seeding, repairing the rolling table, or validating a remote project after migration.
 
 ## Security model
 
@@ -153,8 +147,6 @@ Recommended Johoe environment values for Portainer:
 
 - `DATABASE_URL`: use the Supabase Transaction Pooler
 - `JOHOE_24H_SYNC_INTERVAL_MS=60000`
-- `JOHOE_30D_SYNC_INTERVAL_MS=900000`
-- `JOHOE_ALL_SYNC_INTERVAL_MS=21600000`
 - `JOHOE_DEFAULT_RANGE=24h`
 - `JOHOE_QUERY_LIMIT_MAX=5000`
 
@@ -183,8 +175,6 @@ Recommended post-deploy checks:
 
 - `GET /api/scrape/johoe-btc-queue/latest`
 - `GET /api/scrape/johoe-btc-queue/history?range=24h&limit=60`
-- `GET /api/scrape/johoe-btc-queue/history?range=30d&limit=120`
-- `GET /api/scrape/johoe-btc-queue/history?range=all&limit=365`
 
 ## Migration from `knotapi.zatobox.io`
 
