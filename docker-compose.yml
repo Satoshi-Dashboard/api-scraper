@@ -4,7 +4,7 @@ services:
     container_name: satoshi-scraper
     restart: unless-stopped
     ports:
-      - "${SCRAPER_BIND_ADDRESS:-127.0.0.1}:9119:9119"
+      - "9119:9119"
     environment:
       - PORT=9119
       - NODE_ENV=production
@@ -42,10 +42,10 @@ services:
       - REFRESH_MIN_INTERVAL_MS=${REFRESH_MIN_INTERVAL_MS:-60000}
       - FRED_MAX_LIMIT=${FRED_MAX_LIMIT:-1000}
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9119/readyz').then((res) => process.exit(res.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9119/health').then((res) => process.exit(res.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 30s
       timeout: 5s
-      start_period: 120s
+      start_period: 30s
       retries: 3
     volumes:
       - ./cache:/app/cache
