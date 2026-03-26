@@ -368,6 +368,7 @@ let mempoolSpaceMempoolLastError = null;
 let mempoolSpaceMempoolPollTimer = null;
 let mempoolSpaceMempoolPollInFlight = false;
 let mempoolKnotsLastError = null;
+let mempoolKnotsFailCount = 0;
 let mempoolKnotsSnapshotTimer = null;
 let mempoolKnotsLatestData = null;
 let mempoolKnotsLatestInitData = null;
@@ -773,9 +774,14 @@ async function pollMempoolKnotsHttp() {
     setCache(MEMPOOL_KNOTS_INIT_DATA_CACHE_KEY, mempoolKnotsLatestInitData);
     setCache(MEMPOOL_KNOTS_CACHE_KEY, mempoolKnotsLatestData);
     mempoolKnotsLastError = null;
+    mempoolKnotsFailCount = 0;
   } catch (e) {
     mempoolKnotsLastError = e instanceof Error ? e.message : String(e);
-    console.warn(`[http] mempool knots poll failed: ${mempoolKnotsLastError}`);
+    mempoolKnotsFailCount++;
+    // Log on first failure, then throttle to once every 60 attempts (~60s at default 1s interval)
+    if (mempoolKnotsFailCount === 1 || mempoolKnotsFailCount % 60 === 0) {
+      console.warn(`[http] mempool knots poll failed (×${mempoolKnotsFailCount}): ${mempoolKnotsLastError}`);
+    }
   } finally {
     mempoolKnotsHttpPollInFlight = false;
   }
