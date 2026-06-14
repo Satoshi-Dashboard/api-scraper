@@ -1485,11 +1485,54 @@ async function scrapeBitnodes() {
   }
   if (!total_nodes) total_nodes = rows.reduce((s, [, c]) => s + c, 0);
 
+  // Extract "Node Count By Protocol Type" Google chart.
+  // Header column may be "Protocol", "Type", or "Protocol Type".
+  let protocolBreakdown = null;
+  const pm = html.match(
+    /arrayToDataTable\(\s*(\[\s*\[\s*"(?:Protocol(?:\s+Type)?|Type)"\s*,\s*"Node Count"\][\s\S]*?\])\s*\)/i
+  );
+  if (pm) {
+    try {
+      const ptable = JSON.parse(pm[1]);
+      if (Array.isArray(ptable) && ptable.length > 1) {
+        const parseCell = (cell) => {
+          const formatted = cell && typeof cell === 'object' ? cell.f : cell;
+          return parseInt(String(formatted).replace(/[^\d]/g, ''), 10) || 0;
+        };
+        const findRow = (label) => ptable.slice(1).find(
+          (r) => String(r[0]).toLowerCase().includes(label.toLowerCase())
+        );
+        const ipv4 = parseCell(findRow('ipv4')?.[1]);
+        const ipv6 = parseCell(findRow('ipv6')?.[1]);
+        const onion = parseCell(findRow('onion') || findRow('tor') || findRow('.onion'));
+        const onionCell = (findRow('onion') || findRow('tor') || findRow('.onion'))?.[1];
+        const onionCount = parseCell(onionCell);
+        const total = total_nodes || (ipv4 + ipv6 + onionCount) || 1;
+        const pct = (n) => Number(((n / total) * 100).toFixed(2));
+        protocolBreakdown = {
+          total_nodes: total,
+          ipv4_nodes: ipv4, ipv4_pct: pct(ipv4),
+          ipv6_nodes: ipv6, ipv6_pct: pct(ipv6),
+          onion_nodes: onionCount, onion_pct: pct(onionCount),
+          full_nodes: 0, full_pct: 0,
+          pruned_nodes: 0, pruned_pct: 0,
+          source: 'bitnod.es',
+        };
+        console.log(`[scrape] bitnod.es protocol → IPv4:${ipv4} IPv6:${ipv6} onion:${onionCount}`);
+      }
+    } catch (e) {
+      console.warn(`[scrape] bitnod.es: protocol chart parse failed: ${e.message}`);
+    }
+  } else {
+    console.warn('[scrape] bitnod.es: protocol chart not found — breakdown will be null');
+  }
+
   const timestamp = Math.floor(Date.now() / 1000);
   const result = {
     source: 'bitnod.es',
     apiData: { timestamp, sorted_asns },
     snapshotData: { timestamp, total_nodes, latest_height: null, nodes: {} },
+    protocolBreakdown,
     nodesHtml: null,
     apiError: null,
   };
@@ -1879,6 +1922,17 @@ app.get('/api/scrape/bitinfocharts-richlist', serveCached('bitinfocharts-richlis
 
 // 3. Bitnodes nodes
 app.get('/api/scrape/bitnodes-nodes', serveCached('bitnodes-nodes'));
+
+// 3b. Bitnodes protocol breakdown (IPv4 / IPv6 / onion)
+app.get('/api/scrape/bitnodes-protocol', (_req, res) => {
+  setPublicCacheHeaders(res, ENDPOINT_CACHE_CONTROL['bitnodes-nodes']);
+  const entry = cached('bitnodes-nodes');
+  const breakdown = entry?.data?.protocolBreakdown;
+  if (!breakdown) {
+    return res.status(503).json({ error: 'protocol breakdown not yet scraped' });
+  }
+  res.json({ ...breakdown, _meta: { cachedAt: entry.updatedAt, scraper: 'satoshi-scraper' } });
+});
 
 // 4. Newhedge global assets
 app.get('/api/scrape/newhedge-global-assets', serveCached('newhedge-global-assets'));
