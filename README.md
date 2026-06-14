@@ -22,7 +22,7 @@ This also gives you better control over:
 |----------|--------|---------------|-----------------|
 | `/api/scrape/investing-currencies` | Investing.com | USD FX cross rates (EUR/USD, GBP/USD, etc.) | Every 60 seconds |
 | `/api/scrape/bitinfocharts-richlist` | BitInfoCharts | Top 100 richest Bitcoin addresses and distribution data | Daily at 02:00 UTC |
-| `/api/scrape/bitnodes-nodes` | BitNodes.io | Bitcoin node count and ASN distribution | Twice daily at 06:05 and 18:05 UTC |
+| `/api/scrape/bitnodes-nodes` | bitnod.es | Bitcoin node count by country (top 100 geolocated, ISO-2 codes) | Twice daily at 06:05 and 18:05 UTC |
 | `/api/scrape/newhedge-global-assets` | NewHedge.io | Global asset values related to Bitcoin comparisons | Hourly |
 | `/api/scrape/companiesmarketcap-gold` | CompaniesMarketCap | `GOLD`, market cap, gold price, and daily change | Every 15 minutes |
 | `/api/scrape/fred-house-price` | FRED + Binance | US median house price series normalized with BTC history | Daily at 03:00 UTC |

@@ -7,7 +7,7 @@
  * Proxied sources:
  *   1. investing.com  → /api/scrape/investing-currencies
  *   2. bitinfocharts   → /api/scrape/bitinfocharts-richlist
- *   3. bitnodes.io     → /api/scrape/bitnodes-nodes  (API + HTML fallback)
+ *   3. bitnod.es       → /api/scrape/bitnodes-nodes  (Node Count By Country)
  *   4. newhedge.io     → /api/scrape/newhedge-global-assets
  *   5. companiesmarketcap.com → /api/scrape/companiesmarketcap-gold
  *   6. mempool.space memory → /api/scrape/mempool-space-memory-usage
@@ -1362,13 +1362,46 @@ async function scrapeBitinfocharts() {
 }
 
 // ═══════════════════════════════════════════════
-//  3. BITNODES.IO — Bitcoin nodes (API + HTML fallback)
+//  3. BITNOD.ES — Bitcoin nodes (Node Count By Country)
 // ═══════════════════════════════════════════════
-const BITNODES_API_URL = 'https://bitnodes.io/api/v1/snapshots/latest/?field=sorted_asns';
-const BITNODES_SNAPSHOT_URL = 'https://bitnodes.io/api/v1/snapshots/latest/';
-const BITNODES_NODES_PAGE_URL = 'https://bitnodes.io/nodes/';
+const BITNODES_HOME_URL = 'https://bitnod.es/';
 
-// Next snapshot run at 06:05 or 18:05 UTC (5 min after bitnodes.io snapshots)
+// Country name (Google GeoChart English label) → ISO-3166-1 alpha-2 code.
+// Keeps apiData.sorted_asns[*][0] identical to the legacy bitnodes.io shape so the
+// consuming app (which aggregates per-country by col0) needs no changes.
+const COUNTRY_NAME_TO_ISO = {
+  'United States': 'US', Germany: 'DE', France: 'FR', Canada: 'CA', Netherlands: 'NL',
+  Finland: 'FI', 'United Kingdom': 'GB', Switzerland: 'CH', Australia: 'AU', Russia: 'RU',
+  Singapore: 'SG', Japan: 'JP', 'South Korea': 'KR', Spain: 'ES', Brazil: 'BR',
+  Sweden: 'SE', Italy: 'IT', Czechia: 'CZ', 'Czech Republic': 'CZ', Ireland: 'IE',
+  Austria: 'AT', 'Hong Kong': 'HK', Poland: 'PL', India: 'IN', Belgium: 'BE',
+  Ukraine: 'UA', Thailand: 'TH', Taiwan: 'TW', Mexico: 'MX', Romania: 'RO',
+  China: 'CN', Bulgaria: 'BG', Lithuania: 'LT', Norway: 'NO', Indonesia: 'ID',
+  Portugal: 'PT', 'New Zealand': 'NZ', Hungary: 'HU', 'South Africa': 'ZA',
+  'United Arab Emirates': 'AE', Malaysia: 'MY', Denmark: 'DK', Slovenia: 'SI',
+  Slovakia: 'SK', Argentina: 'AR', Greece: 'GR', 'Türkiye': 'TR', Turkey: 'TR',
+  Iceland: 'IS', Croatia: 'HR', 'Saudi Arabia': 'SA', Uruguay: 'UY', Israel: 'IL',
+  Colombia: 'CO', Moldova: 'MD', Chile: 'CL', Philippines: 'PH', Estonia: 'EE',
+  Serbia: 'RS', Luxembourg: 'LU', Latvia: 'LV', Vietnam: 'VN', Qatar: 'QA',
+  Venezuela: 'VE', Malta: 'MT', 'Costa Rica': 'CR', Oman: 'OM', Cyprus: 'CY',
+  Belarus: 'BY', 'Dominican Republic': 'DO', Andorra: 'AD', Macao: 'MO', Macau: 'MO',
+  Liechtenstein: 'LI', Georgia: 'GE', Kazakhstan: 'KZ', Algeria: 'DZ', Kyrgyzstan: 'KG',
+  Kuwait: 'KW', Iran: 'IR', Bahrain: 'BH', Panama: 'PA', Mauritius: 'MU',
+  'Curaçao': 'CW', Honduras: 'HN', 'Faroe Islands': 'FO', Ecuador: 'EC',
+  'Puerto Rico': 'PR', 'Isle of Man': 'IM', Pakistan: 'PK', Azerbaijan: 'AZ',
+  Kenya: 'KE', Guadeloupe: 'GP', Jersey: 'JE', Armenia: 'AM', Cambodia: 'KH',
+  Belize: 'BZ', Peru: 'PE', Paraguay: 'PY', Bolivia: 'BO', Bangladesh: 'BD',
+  'Réunion': 'RE', Guernsey: 'GG', Gibraltar: 'GI', Monaco: 'MC', Egypt: 'EG',
+  Nigeria: 'NG', Morocco: 'MA', Tunisia: 'TN', Lebanon: 'LB', Jordan: 'JO',
+  Iraq: 'IQ', Nepal: 'NP', 'Sri Lanka': 'LK', Myanmar: 'MM', Mongolia: 'MN',
+  Uzbekistan: 'UZ', Guatemala: 'GT', 'El Salvador': 'SV', Nicaragua: 'NI',
+  'Trinidad and Tobago': 'TT', Jamaica: 'JM', Bahamas: 'BS', Barbados: 'BB',
+  Albania: 'AL', 'North Macedonia': 'MK', 'Bosnia and Herzegovina': 'BA',
+  Montenegro: 'ME', Kosovo: 'XK', Seychelles: 'SC', 'Cayman Islands': 'KY',
+  Bermuda: 'BM', Greenland: 'GL', 'Hashemite Kingdom of Jordan': 'JO',
+};
+
+// Next snapshot run at 06:05 or 18:05 UTC.
 function nextBitnodesRunAt() {
   const now = new Date();
   const y = now.getUTCFullYear();
@@ -1383,48 +1416,85 @@ function nextBitnodesRunAt() {
 }
 
 async function scrapeBitnodes() {
-  console.log('[scrape] bitnodes.io ...');
+  console.log('[scrape] bitnod.es ...');
 
-  let apiData = null;
-  let snapshotData = null;
-  let nodesHtml = null;
-  let apiError = null;
-
-  // Try API first
+  // Fetch the homepage HTML. fetchText sends a browser User-Agent, which bitnod.es
+  // requires (a generic UA gets HTTP 403).
+  let html;
   try {
-    const [apiResult, snapshotResult] = await Promise.allSettled([
-      fetchJson(BITNODES_API_URL),
-      fetchJson(BITNODES_SNAPSHOT_URL),
-    ]);
-    if (apiResult.status === 'fulfilled') apiData = apiResult.value;
-    else apiError = String(apiResult.reason);
-    if (snapshotResult.status === 'fulfilled') snapshotData = snapshotResult.value;
+    html = await fetchText(BITNODES_HOME_URL);
+    console.log(`[scrape] bitnod.es HTML → ${html.length} bytes`);
   } catch (e) {
-    apiError = e instanceof Error ? e.message : String(e);
+    console.warn(`[scrape] bitnod.es fetch failed: ${e.message} — keeping last snapshot`);
+    return;
   }
 
-  if (!apiData || !snapshotData) {
-    try {
-      nodesHtml = await fetchText(BITNODES_NODES_PAGE_URL);
-      console.log(`[scrape] bitnodes.io HTML → ${nodesHtml.length} bytes`);
-    } catch (e) {
-      console.warn(`[scrape] bitnodes.io HTML fallback failed: ${e.message}`);
-    }
+  // Extract the "Node Count By Country" Google chart. Anchored on the exact header so
+  // it never matches "Core v30 Vs BIP-110 By Country". Parsed inertly with JSON.parse
+  // (never eval/Function) per scraper rule 12.
+  const m = html.match(
+    /arrayToDataTable\(\s*(\[\s*\[\s*"Country"\s*,\s*"Node Count"\][\s\S]*?\])\s*\)/
+  );
+  if (!m) {
+    console.warn('[scrape] bitnod.es: country chart not found — keeping last snapshot');
+    return;
   }
 
+  let table;
+  try {
+    table = JSON.parse(m[1]);
+  } catch (e) {
+    console.warn(`[scrape] bitnod.es: country chart parse failed: ${e.message} — keeping last snapshot`);
+    return;
+  }
+
+  if (!Array.isArray(table) || table[0]?.[0] !== 'Country' || table[0]?.[1] !== 'Node Count') {
+    console.warn('[scrape] bitnod.es: unexpected country chart header — keeping last snapshot');
+    return;
+  }
+
+  // Each data cell is { v: <log-scaled>, f: "3,552" }. The real count lives in `f`.
+  const rows = table.slice(1).map(([name, cell]) => {
+    const formatted = cell && typeof cell === 'object' ? cell.f : cell;
+    const count = parseInt(String(formatted).replace(/[^\d]/g, ''), 10) || 0;
+    return [name, count];
+  });
+
+  // One row per country = [iso, countryName, 0, count]. Aggregating by col0 reproduces
+  // the per-country distribution exactly (legacy sorted_asns contract).
+  const sorted_asns = rows
+    .map(([name, count]) => [COUNTRY_NAME_TO_ISO[name] || name, name, 0, count])
+    .sort((a, b) => b[3] - a[3]);
+
+  const unmapped = rows
+    .map(([name]) => name)
+    .filter((name) => name !== 'Unknown' && !COUNTRY_NAME_TO_ISO[name]);
+  if (unmapped.length) {
+    console.warn(`[scrape] bitnod.es: unmapped country names → ${unmapped.join(', ')}`);
+  }
+
+  // Real total node count comes from the summary "Total" rows (the country chart only
+  // covers the top geolocated countries and undercounts). Take the max across all
+  // "Total" rows, since the country-table total is always ≤ the global total.
+  const totalRe = />\s*Total\s*<\/td>\s*<td[^>]*>\s*([\d,]+)\s*<\/td>/gi;
+  let total_nodes = 0;
+  let tm;
+  while ((tm = totalRe.exec(html))) {
+    const n = parseInt(tm[1].replace(/[^\d]/g, ''), 10) || 0;
+    if (n > total_nodes) total_nodes = n;
+  }
+  if (!total_nodes) total_nodes = rows.reduce((s, [, c]) => s + c, 0);
+
+  const timestamp = Math.floor(Date.now() / 1000);
   const result = {
-    source: 'bitnodes.io',
-    apiData,
-    snapshotData,
-    nodesHtml,
-    apiError,
+    source: 'bitnod.es',
+    apiData: { timestamp, sorted_asns },
+    snapshotData: { timestamp, total_nodes, latest_height: null, nodes: {} },
+    nodesHtml: null,
+    apiError: null,
   };
 
-  if (apiData) {
-    console.log('[scrape] bitnodes.io API → OK');
-  } else {
-    console.warn(`[scrape] bitnodes.io API → FAIL (${apiError})`);
-  }
+  console.log(`[scrape] bitnod.es → OK (${sorted_asns.length} countries, ${total_nodes} nodes)`);
 
   setCache('bitnodes-nodes', result);
   await writeDiskCache('bitnodes-nodes', result, nextBitnodesRunAt());
@@ -2179,7 +2249,7 @@ cron.schedule('0 2 * * *', () => {
   scrapeBitinfocharts().catch((e) => console.error('[cron] bitinfocharts:', e.message));
 });
 
-// Bitnodes: twice daily at 06:05 and 18:05 UTC (5 min after bitnodes.io snapshots)
+// Bitnod.es: twice daily at 06:05 and 18:05 UTC
 cron.schedule('5 6,18 * * *', () => {
   scrapeBitnodes().catch((e) => console.error('[cron] bitnodes:', e.message));
 });
